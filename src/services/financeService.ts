@@ -4,6 +4,7 @@ import { safeNumber, safeDate, round2, parseBCBRate } from '../lib/utils';
 
 class FinanceService {
   private trCache: Map<string, number> = new Map(); // month-key (yyyy-MM) -> monthly-rate
+  
 
   private sumByInstallment(transactions: Transaction[], installmentNumber: number, type: 'PAYMENT' | 'LANCE'): number {
     if (!Array.isArray(transactions)) return 0;

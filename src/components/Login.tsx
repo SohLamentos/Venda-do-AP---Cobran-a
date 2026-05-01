@@ -52,16 +52,21 @@ export const Login: React.FC = () => {
         className="w-full max-w-md"
       >
         <div className="flex flex-col items-center mb-10">
-          <div className="w-16 h-16 bg-gradient-to-br from-indigo-600 to-violet-600 rounded-2xl flex items-center justify-center shadow-indigo-200 shadow-xl mb-6 transform -rotate-3">
+          <div className="w-16 h-16 bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl flex items-center justify-center shadow-indigo-200 shadow-xl mb-6 transform -rotate-3">
             <Building2 className="text-white w-9 h-9" />
           </div>
-          <h1 className="text-3xl font-black text-slate-900 tracking-tight mb-2">FinanTech</h1>
-          <p className="text-slate-500 font-medium tracking-wide text-sm uppercase">Gestor de Amortização</p>
+          <h1 className="text-3xl font-black text-slate-900 tracking-tight mb-2">
+  Portal do Comprador
+</h1>
+
+<p className="text-slate-500 font-medium tracking-wide text-sm uppercase">
+  Acompanhamento de Pagamentos do Imóvel
+</p>
         </div>
 
         <div className="bg-white p-10 rounded-3xl shadow-xl shadow-slate-200/50 border border-slate-100">
           <h2 className="text-xl font-bold text-slate-800 mb-8 flex items-center justify-between">
-            Acesse sua conta
+            Área do Cliente
             <button 
               type="button" 
               onClick={testFirebase}
@@ -122,18 +127,17 @@ export const Login: React.FC = () => {
                 <Loader2 className="w-5 h-5 animate-spin" />
               ) : (
                 <>
-                  Entrar no sistema
+                  Acessar minha conta
                   <LogIn className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                 </>
               )}
-            </button>
+                        </button>
           </form>
-        </div>
 
-        <p className="text-center mt-10 text-slate-400 text-sm font-medium">
-          Sistema Seguro &bullet; Dados Criptografados
-        </p>
-      </motion.div>
+          <p className="text-xs text-slate-500 text-center mt-6 leading-relaxed">
+            🔒 Ambiente seguro • Controle completo da sua compra.
+          </p>
+        </div>
     </div>
   );
 };

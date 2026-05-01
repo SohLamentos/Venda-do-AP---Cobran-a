@@ -134,10 +134,11 @@ export const Login: React.FC = () => {
                         </button>
           </form>
 
-          <p className="text-xs text-slate-500 text-center mt-6 leading-relaxed">
+                    <p className="text-xs text-slate-500 text-center mt-6 leading-relaxed">
             🔒 Ambiente seguro • Controle completo da sua compra.
           </p>
         </div>
+      </motion.div>
     </div>
   );
 };

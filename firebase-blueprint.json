@@ -1,0 +1,51 @@
+{
+  "entities": {
+    "Contract": {
+      "title": "Contract",
+      "description": "Fixed financing configuration",
+      "type": "object",
+      "properties": {
+        "financedAmount": { "type": "number" },
+        "fixedInstallment": { "type": "number" },
+        "annualInterestRate": { "type": "number" },
+        "termMonths": { "type": "number" },
+        "startDate": { "type": "string", "format": "date" },
+        "finePercent": { "type": "number" },
+        "trMode": { "type": "string", "enum": ["MONTHLY", "ANNUAL"] },
+        "ownerId": { "type": "string" }
+      },
+      "required": ["financedAmount", "fixedInstallment", "annualInterestRate", "termMonths", "startDate", "finePercent", "trMode", "ownerId"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A payment or lance recorded in the contract",
+      "type": "object",
+      "properties": {
+        "installmentNumber": { "type": "number" },
+        "type": { "type": "string", "enum": ["PAYMENT", "LANCE"] },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "format": "date" },
+        "method": { "type": "string" },
+        "status": { "type": "string" },
+        "receiptUrl": { "type": "string" },
+        "receiptBase64": { "type": "string" },
+        "receiptMimeType": { "type": "string" },
+        "receiptFileName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "createdByEmail": { "type": "string" }
+      },
+      "required": ["installmentNumber", "type", "amount", "date", "createdAt", "createdBy", "createdByEmail"]
+    }
+  },
+  "firestore": {
+    "contracts/{contractId}": {
+      "schema": "Contract",
+      "description": "Main contract record containing configuration"
+    },
+    "contracts/{contractId}/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Payments and lances related to the contract"
+    }
+  }
+}

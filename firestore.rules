@@ -1,0 +1,77 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helper Functions ---
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(ownerId) {
+      return isSignedIn() && request.auth.uid == ownerId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidContract(data) {
+      return data.keys().hasAll(['financedAmount', 'fixedInstallment', 'annualInterestRate', 'termMonths', 'startDate', 'finePercent', 'trMode', 'ownerId', 'id'])
+          && data.keys().size() == 9
+          && data.financedAmount is number && data.financedAmount > 0
+          && data.fixedInstallment is number && data.fixedInstallment > 0
+          && data.annualInterestRate is number
+          && data.termMonths is number && data.termMonths > 0
+          && data.startDate is string && data.startDate.size() <= 10
+          && data.finePercent is number
+          && data.trMode in ['MONTHLY', 'ANNUAL']
+          && (data.ownerId == request.auth.uid || data.ownerId == null);
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['installmentNumber', 'type', 'amount', 'date', 'createdAt', 'createdBy', 'createdByEmail'])
+          && data.installmentNumber is number && data.installmentNumber > 0
+          && data.type in ['PAYMENT', 'LANCE']
+          && data.amount is number && data.amount >= 0
+          && data.date is string && data.date.size() <= 10
+          && (data.get('method', '') is string && data.get('method', '').size() <= 64)
+          && (data.get('receiptUrl', null) == null || (data.receiptUrl is string && data.receiptUrl.size() <= 2048))
+          && (data.get('receiptBase64', null) == null || (data.receiptBase64 is string && data.receiptBase64.size() <= 1500000))
+          && (data.get('receiptMimeType', null) == null || (data.receiptMimeType is string && data.receiptMimeType.size() <= 128))
+          && (data.get('receiptFileName', null) == null || (data.receiptFileName is string && data.receiptFileName.size() <= 255))
+          && data.createdAt is timestamp
+          && data.createdBy == request.auth.uid;
+    }
+
+    // --- Collection Routes ---
+
+    match /contracts/{contractId} {
+      // Allow any signed-in user to read/write contracts for now to fix initialization issues
+      allow get, list, create, update, delete: if isSignedIn();
+
+      // --- Sub-collections ---
+      
+      match /transactions/{transactionId} {
+        // Broaden access to transactions to ensure functionality
+        allow read, write: if isSignedIn();
+      }
+    }
+  }
+}

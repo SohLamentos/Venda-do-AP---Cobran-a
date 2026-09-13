@@ -1,9 +1,151 @@
+/**
+ * ============================================================================
+ * ETN / VENDA DE APARTAMENTOS — CLOUDFLARE WORKER API
+ * ============================================================================
+ * NOTAS DE SEGURANÇA E ARQUITETURA:
+ * 1. SEGURANÇA: Os endpoints /api/v1/contracts e /api/v1/transactions NÃO possuem
+ *    autenticação real implementada no Worker nesta etapa. Portanto, NÃO estão
+ *    liberados para persistência financeira de produção até a etapa dedicada de
+ *    autenticação/autorização (RBAC/JWT).
+ * 2. FONTE DA VERDADE ATIVA: O Firebase continua temporariamente como a persistência
+ *    ativa de dados do frontend (App.tsx).
+ * 3. USERS / FOREIGN KEY: contracts.user_id possui chave estrangeira para users(id).
+ *    A sincronização da tabela users é uma pendência obrigatória da futura migração
+ *    antes de permitir a criação de contratos D1 em produção.
+ * 4. VALORES MONETÁRIOS: Campos monetários no D1 estão atualmente como REAL.
+ *    Decisão pendente antes da carga de dados reais: avaliar armazenamento em
+ *    centavos usando INTEGER para prevenir imprecisões de ponto flutuante.
+ * ============================================================================
+ */
+
 /// <reference types="@cloudflare/workers-types" />
 
 export interface Env {
   DB?: D1Database;
   RECEIPTS?: R2Bucket;
   ASSETS?: Fetcher;
+}
+
+/**
+ * Frontend ContractConfig interface (camelCase)
+ */
+export interface FrontendContractConfig {
+  id?: string;
+  name?: string;
+  propertyDescription?: string;
+  financedAmount: number;
+  fixedInstallment: number;
+  annualInterestRate: number;
+  termMonths: number;
+  startDate: string;
+  finePercent: number;
+  trMode: 'MONTHLY' | 'ANNUAL';
+  ownerId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Maps a D1 database contract row (snake_case) to Frontend ContractConfig (camelCase).
+ * Explicit mapping:
+ *   user_id <-> ownerId
+ *   property_description <-> propertyDescription
+ *   financed_amount <-> financedAmount
+ *   fixed_installment <-> fixedInstallment
+ *   annual_interest_rate <-> annualInterestRate
+ *   term_months <-> termMonths
+ *   start_date <-> startDate
+ *   fine_percent <-> finePercent
+ *   tr_mode <-> trMode
+ *   created_at <-> createdAt
+ *   updated_at <-> updatedAt
+ */
+export function mapContractDbToFrontend(row: Record<string, any>): FrontendContractConfig {
+  return {
+    id: row.id,
+    name: row.name || '',
+    propertyDescription: row.property_description ?? row.propertyDescription ?? '',
+    financedAmount: Number(row.financed_amount ?? row.financedAmount ?? 0),
+    fixedInstallment: Number(row.fixed_installment ?? row.fixedInstallment ?? 0),
+    annualInterestRate: Number(row.annual_interest_rate ?? row.annualInterestRate ?? 0),
+    termMonths: Number(row.term_months ?? row.termMonths ?? 0),
+    startDate: row.start_date || row.startDate || '',
+    finePercent: Number(row.fine_percent ?? row.finePercent ?? 0),
+    trMode: (row.tr_mode || row.trMode || 'ANNUAL') as 'MONTHLY' | 'ANNUAL',
+    ownerId: row.user_id ?? row.ownerId ?? row.userId ?? undefined,
+    createdAt: row.created_at || row.createdAt || undefined,
+    updatedAt: row.updated_at || row.updatedAt || undefined,
+  };
+}
+
+/**
+ * Maps incoming ContractConfig payload (camelCase, with snake_case fallback) to D1 fields (snake_case).
+ */
+export function mapContractFrontendToDb(payload: Record<string, any>, defaultId?: string) {
+  const now = new Date().toISOString();
+  return {
+    id: payload.id || defaultId || crypto.randomUUID(),
+    user_id: payload.ownerId ?? payload.userId ?? payload.user_id ?? null,
+    name: payload.name || 'Novo Contrato',
+    property_description: payload.propertyDescription ?? payload.property_description ?? '',
+    financed_amount: Number(payload.financedAmount ?? payload.financed_amount ?? 0),
+    fixed_installment: Number(payload.fixedInstallment ?? payload.fixed_installment ?? 0),
+    annual_interest_rate: Number(payload.annualInterestRate ?? payload.annual_interest_rate ?? 0),
+    term_months: Number(payload.termMonths ?? payload.term_months ?? 0),
+    start_date: payload.startDate || payload.start_date || now.split('T')[0],
+    fine_percent: Number(payload.finePercent ?? payload.fine_percent ?? 0),
+    tr_mode: (payload.trMode || payload.tr_mode || 'ANNUAL') as 'MONTHLY' | 'ANNUAL',
+    created_at: payload.createdAt || payload.created_at || now,
+    updated_at: now,
+  };
+}
+
+/**
+ * Maps a D1 transaction row (snake_case) to Frontend Transaction (camelCase).
+ */
+export function mapTransactionDbToFrontend(row: Record<string, any>) {
+  return {
+    id: row.id,
+    contractId: row.contract_id ?? row.contractId,
+    date: row.date,
+    installmentNumber: Number(row.installment_number ?? row.installmentNumber ?? 1),
+    amount: Number(row.amount ?? 0),
+    type: (row.type === 'LANCE' ? 'LANCE' : 'PAYMENT') as 'PAYMENT' | 'LANCE',
+    method: row.method || 'PIX',
+    observation: row.observation ?? undefined,
+    status: (row.status === 'EM_ABERTO' ? 'EM_ABERTO' : 'PAGO') as 'PAGO' | 'EM_ABERTO',
+    receiptKey: row.receipt_key ?? row.receiptKey ?? undefined,
+    receiptFileName: row.receipt_file_name ?? row.receiptFileName ?? undefined,
+    receiptMimeType: row.receipt_mime_type ?? row.receiptMimeType ?? undefined,
+    createdBy: row.created_by ?? row.createdBy ?? undefined,
+    createdByEmail: row.created_by_email ?? row.createdByEmail ?? undefined,
+    createdAt: row.created_at ?? row.createdAt ?? undefined,
+  };
+}
+
+/**
+ * Maps incoming Transaction payload (camelCase, with snake_case fallback) to D1 fields (snake_case).
+ */
+export function mapTransactionFrontendToDb(payload: Record<string, any>, defaultId?: string) {
+  const now = new Date().toISOString();
+  return {
+    id: payload.id || defaultId || crypto.randomUUID(),
+    contract_id: payload.contractId ?? payload.contract_id ?? '',
+    date: payload.date || now.split('T')[0],
+    installment_number: Number(payload.installmentNumber ?? payload.installment_number ?? 1),
+    amount: Number(payload.amount ?? 0),
+    type: payload.type === 'LANCE' ? 'LANCE' : 'PAYMENT',
+    method: payload.method || 'PIX',
+    observation: payload.observation ?? null,
+    status: payload.status || 'PAGO',
+    receipt_key: payload.receiptKey ?? payload.receipt_key ?? null,
+    receipt_file_name: payload.receiptFileName ?? payload.receipt_file_name ?? null,
+    receipt_mime_type: payload.receiptMimeType ?? payload.receipt_mime_type ?? null,
+    created_by: payload.createdBy ?? payload.created_by ?? null,
+    created_by_email: payload.createdByEmail ?? payload.created_by_email ?? null,
+    created_at: payload.createdAt ?? payload.created_at ?? now,
+    updated_at: now,
+  };
 }
 
 const jsonHeaders = {
@@ -91,18 +233,17 @@ async function handleContracts(request: Request, env: Env, url: URL): Promise<Re
         if (!contract) {
           return jsonResponse({ ok: false, error: 'Contract not found' }, 404);
         }
-        return jsonResponse({ ok: true, data: contract });
+        return jsonResponse({ ok: true, data: mapContractDbToFrontend(contract) });
       } else {
         const stmt = env.DB.prepare('SELECT * FROM contracts ORDER BY created_at DESC');
         const { results } = await stmt.all();
-        return jsonResponse({ ok: true, data: results || [] });
+        return jsonResponse({ ok: true, data: (results || []).map(mapContractDbToFrontend) });
       }
     }
 
     if (request.method === 'POST') {
       const body = await request.json() as Record<string, any>;
-      const id = body.id || crypto.randomUUID();
-      const now = new Date().toISOString();
+      const record = mapContractFrontendToDb(body);
 
       await env.DB.prepare(`
         INSERT INTO contracts (
@@ -111,22 +252,22 @@ async function handleContracts(request: Request, env: Env, url: URL): Promise<Re
           start_date, fine_percent, tr_mode, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
-        id,
-        body.userId || body.user_id || null,
-        body.name || 'Novo Contrato',
-        body.propertyDescription || body.property_description || '',
-        Number(body.financedAmount ?? body.financed_amount ?? 0),
-        Number(body.fixedInstallment ?? body.fixed_installment ?? 0),
-        Number(body.annualInterestRate ?? body.annual_interest_rate ?? 0),
-        Number(body.termMonths ?? body.term_months ?? 0),
-        body.startDate || body.start_date || now.split('T')[0],
-        Number(body.finePercent ?? body.fine_percent ?? 0),
-        body.trMode || body.tr_mode || 'ANNUAL',
-        now,
-        now
+        record.id,
+        record.user_id,
+        record.name,
+        record.property_description,
+        record.financed_amount,
+        record.fixed_installment,
+        record.annual_interest_rate,
+        record.term_months,
+        record.start_date,
+        record.fine_percent,
+        record.tr_mode,
+        record.created_at,
+        record.updated_at
       ).run();
 
-      return jsonResponse({ ok: true, id, message: 'Contract created successfully' }, 201);
+      return jsonResponse({ ok: true, id: record.id, message: 'Contract created successfully' }, 201);
     }
 
     if (request.method === 'PUT') {
@@ -137,8 +278,19 @@ async function handleContracts(request: Request, env: Env, url: URL): Promise<Re
       }
 
       const now = new Date().toISOString();
+      const userId = body.ownerId ?? body.userId ?? body.user_id ?? null;
+      const propDesc = body.propertyDescription ?? body.property_description ?? null;
+      const financedAmount = body.financedAmount !== undefined ? Number(body.financedAmount) : (body.financed_amount !== undefined ? Number(body.financed_amount) : null);
+      const fixedInstallment = body.fixedInstallment !== undefined ? Number(body.fixedInstallment) : (body.fixed_installment !== undefined ? Number(body.fixed_installment) : null);
+      const annualRate = body.annualInterestRate !== undefined ? Number(body.annualInterestRate) : (body.annual_interest_rate !== undefined ? Number(body.annual_interest_rate) : null);
+      const termMonths = body.termMonths !== undefined ? Number(body.termMonths) : (body.term_months !== undefined ? Number(body.term_months) : null);
+      const startDate = body.startDate ?? body.start_date ?? null;
+      const finePercent = body.finePercent !== undefined ? Number(body.finePercent) : (body.fine_percent !== undefined ? Number(body.fine_percent) : null);
+      const trMode = body.trMode ?? body.tr_mode ?? null;
+
       await env.DB.prepare(`
         UPDATE contracts SET
+          user_id = COALESCE(?, user_id),
           name = COALESCE(?, name),
           property_description = COALESCE(?, property_description),
           financed_amount = COALESCE(?, financed_amount),
@@ -151,15 +303,16 @@ async function handleContracts(request: Request, env: Env, url: URL): Promise<Re
           updated_at = ?
         WHERE id = ?
       `).bind(
+        userId,
         body.name ?? null,
-        body.propertyDescription ?? body.property_description ?? null,
-        body.financedAmount !== undefined ? Number(body.financedAmount) : null,
-        body.fixedInstallment !== undefined ? Number(body.fixedInstallment) : null,
-        body.annualInterestRate !== undefined ? Number(body.annualInterestRate) : null,
-        body.termMonths !== undefined ? Number(body.termMonths) : null,
-        body.startDate ?? body.start_date ?? null,
-        body.finePercent !== undefined ? Number(body.finePercent) : null,
-        body.trMode ?? body.tr_mode ?? null,
+        propDesc,
+        financedAmount,
+        fixedInstallment,
+        annualRate,
+        termMonths,
+        startDate,
+        finePercent,
+        trMode,
         now,
         targetId
       ).run();
@@ -202,38 +355,20 @@ async function handleTransactions(request: Request, env: Env, url: URL): Promise
       `);
       const { results } = await stmt.bind(contractId).all();
 
-      // Transform snake_case columns back to frontend camelCase if needed
-      const mapped = (results || []).map((row: any) => ({
-        id: row.id,
-        contractId: row.contract_id,
-        date: row.date,
-        installmentNumber: row.installment_number,
-        amount: row.amount,
-        type: row.type,
-        method: row.method,
-        observation: row.observation,
-        status: row.status,
-        receiptKey: row.receipt_key,
-        receiptFileName: row.receipt_file_name,
-        receiptMimeType: row.receipt_mime_type,
-        createdBy: row.created_by,
-        createdByEmail: row.created_by_email,
-        createdAt: row.created_at,
-      }));
-
+      const mapped = (results || []).map(mapTransactionDbToFrontend);
       return jsonResponse({ ok: true, data: mapped });
     }
 
     if (request.method === 'POST') {
       const body = await request.json() as Record<string, any>;
-      const id = body.id || crypto.randomUUID();
       const targetContractId = body.contractId || body.contract_id || contractId;
 
       if (!targetContractId) {
         return jsonResponse({ ok: false, error: 'contractId is required' }, 400);
       }
 
-      const now = new Date().toISOString();
+      const record = mapTransactionFrontendToDb({ ...body, contractId: targetContractId });
+
       await env.DB.prepare(`
         INSERT INTO transactions (
           id, contract_id, date, installment_number, amount,
@@ -242,25 +377,25 @@ async function handleTransactions(request: Request, env: Env, url: URL): Promise
           created_by_email, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
-        id,
-        targetContractId,
-        body.date || now.split('T')[0],
-        Number(body.installmentNumber ?? body.installment_number ?? 1),
-        Number(body.amount ?? 0),
-        body.type === 'LANCE' ? 'LANCE' : 'PAYMENT',
-        body.method || 'PIX',
-        body.observation || null,
-        body.status || 'PAGO',
-        body.receiptKey || body.receipt_key || null,
-        body.receiptFileName || body.receipt_file_name || null,
-        body.receiptMimeType || body.receipt_mime_type || null,
-        body.createdBy || body.created_by || null,
-        body.createdByEmail || body.created_by_email || null,
-        now,
-        now
+        record.id,
+        record.contract_id,
+        record.date,
+        record.installment_number,
+        record.amount,
+        record.type,
+        record.method,
+        record.observation,
+        record.status,
+        record.receipt_key,
+        record.receipt_file_name,
+        record.receipt_mime_type,
+        record.created_by,
+        record.created_by_email,
+        record.created_at,
+        record.updated_at
       ).run();
 
-      return jsonResponse({ ok: true, id, message: 'Transaction created successfully' }, 201);
+      return jsonResponse({ ok: true, id: record.id, message: 'Transaction created successfully' }, 201);
     }
 
     if (request.method === 'DELETE') {

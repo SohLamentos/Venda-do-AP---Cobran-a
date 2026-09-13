@@ -37,6 +37,7 @@ import { apiService } from './services/apiService';
 import { ContractConfig, Transaction, AmortizationRow } from './types';
 import { useFirebase } from './components/FirebaseProvider';
 import { Login } from './components/Login';
+import { AdminBootstrap } from './components/AdminBootstrap';
 import { auth, db } from './lib/firebase';
 import { signOut } from 'firebase/auth';
 import { 
@@ -181,6 +182,22 @@ export default function App() {
 
   const [error, setError] = React.useState<string | null>(null);
   const [isSyncing, setIsSyncing] = React.useState(true);
+
+  // Client-side routing for /admin/bootstrap
+  const [currentPath, setCurrentPath] = React.useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return window.location.pathname;
+    }
+    return '/';
+  });
+
+  React.useEffect(() => {
+    const handleLocationChange = () => {
+      setCurrentPath(window.location.pathname);
+    };
+    window.addEventListener('popstate', handleLocationChange);
+    return () => window.removeEventListener('popstate', handleLocationChange);
+  }, []);
 
   // Check Cloudflare Worker API health on mount
   React.useEffect(() => {
@@ -520,6 +537,18 @@ export default function App() {
     }
   };
 
+  // 1. Temporary Admin Bootstrap route
+  if (currentPath === '/admin/bootstrap') {
+    return (
+      <AdminBootstrap 
+        onNavigateToLogin={() => {
+          window.history.pushState({}, '', '/');
+          setCurrentPath('/');
+        }} 
+      />
+    );
+  }
+
   if (loading || (user && isSyncing)) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -532,7 +561,14 @@ export default function App() {
   }
 
   if (!user) {
-    return <Login />;
+    return (
+      <Login 
+        onNavigateToBootstrap={() => {
+          window.history.pushState({}, '', '/admin/bootstrap');
+          setCurrentPath('/admin/bootstrap');
+        }} 
+      />
+    );
   }
 
   return (

@@ -105,6 +105,34 @@ class ApiService {
   }
 
   /**
+   * Bootstrap First Admin (POST /api/v1/admin/bootstrap)
+   * Uses existing worker endpoint with Authorization: Bearer <bootstrapToken>
+   */
+  async adminBootstrap(
+    payload: { email: string; name?: string; password: string },
+    bootstrapToken: string
+  ): Promise<{ ok: boolean; status: number; user?: CloudflareUser; code?: string; error?: string }> {
+    const res = await fetch(`${this.baseUrl}/admin/bootstrap`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${bootstrapToken.trim()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: payload.email.trim(),
+        name: payload.name?.trim() || undefined,
+        password: payload.password,
+      }),
+    });
+    const json = (await res.json().catch(() => ({}))) as Record<string, any>;
+    return {
+      ok: res.ok,
+      status: res.status,
+      ...json,
+    };
+  }
+
+  /**
    * Admin: List users (GET /api/v1/admin/users)
    */
   async adminGetUsers(): Promise<ApiResponse> {

@@ -3,12 +3,25 @@ import { Building2, Mail, Lock, LogIn, AlertCircle, Loader2, ShieldCheck } from 
 import { motion } from 'motion/react';
 import { useAuth } from './FirebaseProvider';
 
-export const Login: React.FC = () => {
+interface LoginProps {
+  onNavigateToBootstrap?: () => void;
+}
+
+export const Login: React.FC<LoginProps> = ({ onNavigateToBootstrap }) => {
   const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const handleGoToBootstrap = () => {
+    if (onNavigateToBootstrap) {
+      onNavigateToBootstrap();
+    } else {
+      window.history.pushState({}, '', '/admin/bootstrap');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+  };
 
   const getFriendlyErrorMessage = (codeOrMessage: string) => {
     switch (codeOrMessage) {
@@ -132,10 +145,17 @@ export const Login: React.FC = () => {
             </button>
           </form>
 
-          <div className="mt-6 pt-6 border-t border-slate-100 text-center">
+          <div className="mt-6 pt-6 border-t border-slate-100 text-center flex flex-col items-center">
             <p className="text-xs text-slate-500 leading-relaxed">
               O acesso de novos clientes e administradores é provisionado de forma segura pelo painel da incorporadora.
             </p>
+            <button
+              type="button"
+              onClick={handleGoToBootstrap}
+              className="mt-3 text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              Configuração Inicial do 1º Administrador (Bootstrap) →
+            </button>
           </div>
         </div>
       </motion.div>

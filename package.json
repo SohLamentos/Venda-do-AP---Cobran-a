@@ -10,6 +10,7 @@
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test:auth": "tsx scripts/test-cloudflare-auth.ts",
+    "test:bootstrap": "tsx scripts/test-admin-bootstrap.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },

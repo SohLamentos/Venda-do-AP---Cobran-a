@@ -33,6 +33,7 @@ import {
 import { format, parse } from 'date-fns';
 import { cn, formatCurrency, formatPercent, safeNumber, safeDate, round2, parseCurrencyBR, formatCurrencyInput } from './lib/utils';
 import { financeService } from './services/financeService';
+import { apiService } from './services/apiService';
 import { ContractConfig, Transaction, AmortizationRow } from './types';
 import { useFirebase } from './components/FirebaseProvider';
 import { Login } from './components/Login';
@@ -105,8 +106,6 @@ function handleFirestoreError(error: any, operationType: OperationType, path: st
   return new Error(JSON.stringify(errInfo));
 }
 
-const CONTRACT_ID = "apt_maringa_2026";
-
 const fileToBase64 = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -116,21 +115,21 @@ const fileToBase64 = (file: File): Promise<string> => {
   });
 };
 
-const FIXED_INSTALLMENT = 1965.63;
-
 function getPaidAmountByInstallment(transactions: Transaction[], installmentNumber: number) {
   return (Array.isArray(transactions) ? transactions : [])
     .filter(t => t.type === "PAYMENT" && safeNumber(t.installmentNumber) === safeNumber(installmentNumber))
     .reduce((sum, t) => sum + safeNumber(t.amount), 0);
 }
 
-function isInstallmentPaid(transactions: Transaction[], installmentNumber: number) {
-  return getPaidAmountByInstallment(transactions, installmentNumber) >= FIXED_INSTALLMENT - 0.01;
+function isInstallmentPaid(transactions: Transaction[], installmentNumber: number, fixedInstallment: number) {
+  if (fixedInstallment <= 0) return false;
+  return getPaidAmountByInstallment(transactions, installmentNumber) >= fixedInstallment - 0.01;
 }
 
-function getFirstUnpaidInstallment(transactions: Transaction[], termMonths: number = 240) {
+function getFirstUnpaidInstallment(transactions: Transaction[], termMonths: number, fixedInstallment: number) {
+  if (termMonths <= 0) return 1;
   for (let i = 1; i <= termMonths; i++) {
-    if (!isInstallmentPaid(transactions, i)) return i;
+    if (!isInstallmentPaid(transactions, i, fixedInstallment)) return i;
   }
   return 1;
 }
@@ -156,13 +155,20 @@ function getCurrentBalance(schedule: AmortizationRow[], transactions: Transactio
 
 export default function App() {
   const { user, loading } = useFirebase();
+  const [contractsList, setContractsList] = React.useState<{ id: string; name: string }[]>([]);
+  const [activeContractId, setActiveContractId] = React.useState<string>(() => {
+    return localStorage.getItem('active_contract_id') || '';
+  });
+
   const [config, setConfig] = React.useState<ContractConfig>({
-    financedAmount: 235000,
-    fixedInstallment: 1965.63,
-    annualInterestRate: 8,
-    termMonths: 240,
+    name: 'Contrato de Imóvel',
+    propertyDescription: '',
+    financedAmount: 0,
+    fixedInstallment: 0,
+    annualInterestRate: 0,
+    termMonths: 0,
     startDate: format(new Date(), 'yyyy-MM-dd'),
-    finePercent: 2,
+    finePercent: 0,
     trMode: 'ANNUAL',
   });
 
@@ -176,85 +182,131 @@ export default function App() {
   const [error, setError] = React.useState<string | null>(null);
   const [isSyncing, setIsSyncing] = React.useState(true);
 
-  // Firebase Sync: Config
+  // Check Cloudflare Worker API health on mount
+  React.useEffect(() => {
+    apiService.checkHealth().then(res => {
+      console.log("[Cloudflare Worker API]", res);
+    }).catch(err => {
+      console.warn("[Cloudflare Worker API] Notice:", err.message);
+    });
+  }, []);
+
+  // Firebase Sync: Load contracts list
   React.useEffect(() => {
     if (!user) return;
 
-    const docRef = doc(db, 'contracts', CONTRACT_ID);
-    
-    // Check if contract exists, if not create it with default values
-    const ensureContract = async () => {
-      try {
-        const snap = await getDoc(docRef);
-        if (!snap.exists()) {
-          console.log("Creating new contract document:", CONTRACT_ID);
-          await setDoc(docRef, {
-            ...config,
-            ownerId: user.uid,
-            id: CONTRACT_ID
-          });
-        } else {
-          console.log("Contract document already exists:", CONTRACT_ID);
-        }
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, `contracts/${CONTRACT_ID}`);
-      }
-    };
-    ensureContract();
+    const contractsCol = collection(db, 'contracts');
+    const unsubscribe = onSnapshot(contractsCol, (snapshot) => {
+      const list: { id: string; name: string }[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data();
+        list.push({
+          id: d.id,
+          name: data.name || data.propertyDescription || `Contrato ${d.id.slice(0, 8)}`,
+        });
+      });
+      setContractsList(list);
 
+      if (list.length > 0) {
+        setActiveContractId(prev => {
+          const exists = list.some(c => c.id === prev);
+          const chosen = exists ? prev : list[0].id;
+          localStorage.setItem('active_contract_id', chosen);
+          return chosen;
+        });
+      } else {
+        // Create initial generic contract if none exists
+        const newId = crypto.randomUUID();
+        const initialContract: ContractConfig = {
+          id: newId,
+          name: 'Contrato Principal',
+          propertyDescription: '',
+          financedAmount: 0,
+          fixedInstallment: 0,
+          annualInterestRate: 0,
+          termMonths: 0,
+          startDate: format(new Date(), 'yyyy-MM-dd'),
+          finePercent: 0,
+          trMode: 'ANNUAL',
+          ownerId: user.uid,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        setDoc(doc(db, 'contracts', newId), initialContract).catch((err) => {
+          handleFirestoreError(err, OperationType.CREATE, `contracts/${newId}`);
+        });
+        setActiveContractId(newId);
+        localStorage.setItem('active_contract_id', newId);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'contracts');
+      setIsSyncing(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Firebase Sync: Config for activeContractId
+  React.useEffect(() => {
+    if (!user || !activeContractId) {
+      if (!user) setIsSyncing(false);
+      return;
+    }
+
+    const docRef = doc(db, 'contracts', activeContractId);
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        console.log("Contract synced from Firestore:", CONTRACT_ID, "Owner:", data.ownerId);
         setConfig(prev => ({
           ...prev,
-          ...data,
-          // Force fixed values as per requirement (calculo financeiro)
-          financedAmount: 235000,
-          fixedInstallment: 1965.63,
-          annualInterestRate: 8,
-          termMonths: 240,
-          finePercent: 2,
+          id: activeContractId,
+          name: data.name || prev.name || 'Contrato de Imóvel',
+          propertyDescription: data.propertyDescription || '',
+          financedAmount: safeNumber(data.financedAmount),
+          fixedInstallment: safeNumber(data.fixedInstallment),
+          annualInterestRate: safeNumber(data.annualInterestRate),
+          termMonths: safeNumber(data.termMonths),
+          startDate: data.startDate || prev.startDate,
+          finePercent: safeNumber(data.finePercent),
+          trMode: data.trMode || prev.trMode || 'ANNUAL',
+          ownerId: data.ownerId,
         }));
       }
       setIsSyncing(false);
     }, (err) => {
-      handleFirestoreError(err, OperationType.GET, `contracts/${CONTRACT_ID}`);
-      setError("Login realizado, mas houve erro ao carregar dados do contrato.");
+      handleFirestoreError(err, OperationType.GET, `contracts/${activeContractId}`);
+      setError("Erro ao carregar dados do contrato selecionado.");
       setIsSyncing(false);
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, activeContractId]);
 
-  // Firebase Sync: Transactions
+  // Firebase Sync: Transactions for activeContractId
   React.useEffect(() => {
-    if (!user) return;
+    if (!user || !activeContractId) return;
 
     const q = query(
-      collection(db, 'contracts', CONTRACT_ID, 'transactions'),
+      collection(db, 'contracts', activeContractId, 'transactions'),
       orderBy('createdAt', 'desc')
     );
 
-    console.log("Starting transactions listener for:", CONTRACT_ID);
     const unsubscribe = onSnapshot(q, (querySnapshot) => {
-      console.log(`Received transactions update: ${querySnapshot.size} records`);
       const txs: Transaction[] = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data();
-        // Convert Firestore Timestamps to ISO strings for compatibility
         if (data.createdAt && typeof data.createdAt.toDate === 'function') {
           data.createdAt = data.createdAt.toDate().toISOString();
         }
-        txs.push({ id: doc.id, ...data } as any);
+        txs.push({ id: doc.id, contractId: activeContractId, ...data } as any);
       });
       setTransactions(txs);
     }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, `contracts/${CONTRACT_ID}/transactions`);
+      handleFirestoreError(err, OperationType.LIST, `contracts/${activeContractId}/transactions`);
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, activeContractId]);
 
   // Global error listener for debug
   React.useEffect(() => {
@@ -353,7 +405,7 @@ export default function App() {
     console.log("Confirmando lançamento", { newTx, file });
     console.log("Arquivo no submit:", file);
     console.log("Usuário atual", user.email, user.uid);
-    console.log("Contrato", CONTRACT_ID);
+    console.log("Contrato ativo:", activeContractId);
 
     try {
       let receiptBase64 = null;
@@ -381,7 +433,8 @@ export default function App() {
         }
       }
 
-      await addDoc(collection(db, 'contracts', CONTRACT_ID, 'transactions'), {
+      await addDoc(collection(db, 'contracts', activeContractId, 'transactions'), {
+        contractId: activeContractId,
         date: newTx.date || format(new Date(), 'yyyy-MM-dd'),
         installmentNumber: safeNumber(newTx.installmentNumber),
         amount: safeNumber(newTx.amount),
@@ -408,30 +461,62 @@ export default function App() {
       if (err?.code === 'permission-denied') {
         alert("Erro de permissão no Firestore. Verifique as regras de segurança.");
       }
-      handleFirestoreError(err, OperationType.CREATE, `contracts/${CONTRACT_ID}/transactions`);
+      handleFirestoreError(err, OperationType.CREATE, `contracts/${activeContractId}/transactions`);
     }
   };
 
   const handleUpdateConfig = async (newConfig: Partial<ContractConfig>) => {
-    if (!user) return;
+    if (!user || !activeContractId) return;
     try {
-      await setDoc(doc(db, 'contracts', CONTRACT_ID), {
+      await setDoc(doc(db, 'contracts', activeContractId), {
         ...config,
         ...newConfig,
-        ownerId: user.uid
+        ownerId: user.uid,
+        updatedAt: new Date().toISOString(),
       }, { merge: true });
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `contracts/${CONTRACT_ID}`);
+      handleFirestoreError(err, OperationType.UPDATE, `contracts/${activeContractId}`);
+    }
+  };
+
+  const handleCreateContract = async () => {
+    if (!user) return;
+    const name = prompt("Identificador ou nome do novo contrato (ex: Apto 102, Casa 05):");
+    if (!name || !name.trim()) return;
+
+    const newId = crypto.randomUUID();
+    const newContract: ContractConfig = {
+      id: newId,
+      name: name.trim(),
+      propertyDescription: '',
+      financedAmount: 0,
+      fixedInstallment: 0,
+      annualInterestRate: 0,
+      termMonths: 0,
+      startDate: format(new Date(), 'yyyy-MM-dd'),
+      finePercent: 0,
+      trMode: 'ANNUAL',
+      ownerId: user.uid,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      await setDoc(doc(db, 'contracts', newId), newContract);
+      setActiveContractId(newId);
+      localStorage.setItem('active_contract_id', newId);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, `contracts/${newId}`);
     }
   };
 
   const handleDeleteTransaction = async (id: string) => {
-    if (!user) return;
+    if (!user || !activeContractId) return;
     if (!confirm("Deseja realmente excluir este lançamento?")) return;
     try {
-      await deleteDoc(doc(db, 'contracts', CONTRACT_ID, 'transactions', id));
+      await deleteDoc(doc(db, 'contracts', activeContractId, 'transactions', id));
     } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `contracts/${CONTRACT_ID}/transactions/${id}`);
+      handleFirestoreError(err, OperationType.DELETE, `contracts/${activeContractId}/transactions/${id}`);
     }
   };
 
@@ -469,35 +554,93 @@ export default function App() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          <div className="flex items-center gap-2 text-slate-500 mb-2">
-            <Settings2 size={16} />
-            <h2 className="text-sm font-semibold uppercase tracking-wider">Parâmetros Fixos</h2>
+          {/* Contrato selector & creator */}
+          <div className="space-y-2 pb-4 border-b border-slate-100">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Contrato</label>
+              <button
+                onClick={handleCreateContract}
+                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 cursor-pointer"
+                title="Novo Contrato"
+              >
+                <Plus size={14} /> Novo Contrato
+              </button>
+            </div>
+            {contractsList.length > 1 ? (
+              <select
+                value={activeContractId}
+                onChange={(e) => {
+                  setActiveContractId(e.target.value);
+                  localStorage.setItem('active_contract_id', e.target.value);
+                }}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 font-medium"
+              >
+                {contractsList.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="text-xs text-slate-700 font-semibold truncate bg-slate-50 px-3 py-2 rounded-lg border border-slate-200">
+                {config.name || 'Contrato Principal'}
+              </div>
+            )}
           </div>
 
-          <ReadOnlyDisplay 
-            label="Valor Financiado" 
-            value={formatCurrency(config.financedAmount)} 
-            icon={<DollarSign size={16} />}
-          />
-          <ReadOnlyDisplay 
-            label="Parcela Fixa" 
-            value={formatCurrency(config.fixedInstallment)} 
-            icon={<Target size={16} />}
-          />
-          <div className="grid grid-cols-2 gap-4">
-            <ReadOnlyDisplay 
-              label="Juros Anual" 
-              value={formatPercent(config.annualInterestRate)} 
-              icon={<Percent size={16} />}
-            />
-            <ReadOnlyDisplay 
-              label="Multa" 
-              value={formatPercent(config.finePercent)} 
+          <div className="flex items-center gap-2 text-slate-500 mb-2">
+            <Settings2 size={16} />
+            <h2 className="text-sm font-semibold uppercase tracking-wider">Parâmetros do Contrato</h2>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-slate-500 uppercase tracking-tight">Nome / Identificação</label>
+            <input 
+              type="text" 
+              value={config.name || ''}
+              onChange={e => handleUpdateConfig({ name: e.target.value })}
+              placeholder="Ex: Apartamento 402"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-semibold"
             />
           </div>
-          <ReadOnlyDisplay 
+
+          <ConfigInput 
+            label="Valor Financiado" 
+            value={config.financedAmount} 
+            onChange={v => handleUpdateConfig({ financedAmount: v })} 
+            icon={<DollarSign size={16} />}
+            isCurrency
+          />
+
+          <ConfigInput 
+            label="Parcela Base" 
+            value={config.fixedInstallment} 
+            onChange={v => handleUpdateConfig({ fixedInstallment: v })} 
+            icon={<Target size={16} />}
+            isCurrency
+          />
+
+          <div className="grid grid-cols-2 gap-4">
+            <ConfigInput 
+              label="Juros Anual" 
+              value={config.annualInterestRate} 
+              onChange={v => handleUpdateConfig({ annualInterestRate: v })} 
+              icon={<Percent size={16} />}
+              suffix="%"
+            />
+            <ConfigInput 
+              label="Multa" 
+              value={config.finePercent} 
+              onChange={v => handleUpdateConfig({ finePercent: v })} 
+              suffix="%"
+            />
+          </div>
+
+          <ConfigInput 
             label="Prazo Contratual" 
-            value={`${config.termMonths} Meses`} 
+            value={config.termMonths} 
+            onChange={v => handleUpdateConfig({ termMonths: v })} 
+            suffix="Meses"
           />
 
           <div className="space-y-1.5">
@@ -1251,7 +1394,7 @@ function TransactionForm({ onAdd, maxInstallment, installmentAmount, transaction
   const [formData, setFormData] = React.useState({
     type: 'PAYMENT' as 'PAYMENT' | 'LANCE',
     amount: installmentAmount,
-    installmentNumber: getFirstUnpaidInstallment(transactions, maxInstallment),
+    installmentNumber: getFirstUnpaidInstallment(transactions, maxInstallment, installmentAmount),
     method: 'PIX',
     date: format(new Date(), 'yyyy-MM-dd'),
   });
@@ -1270,9 +1413,9 @@ function TransactionForm({ onAdd, maxInstallment, installmentAmount, transaction
   React.useEffect(() => {
     setFormData(prev => ({ 
       ...prev, 
-      installmentNumber: getFirstUnpaidInstallment(transactions, maxInstallment)
+      installmentNumber: getFirstUnpaidInstallment(transactions, maxInstallment, installmentAmount)
     }));
-  }, [transactions, maxInstallment]);
+  }, [transactions, maxInstallment, installmentAmount]);
 
   // Keep amount synced with installment amount when type is PAYMENT
   React.useEffect(() => {
@@ -1297,8 +1440,8 @@ function TransactionForm({ onAdd, maxInstallment, installmentAmount, transaction
       }
 
       // Block duplicate payment
-      if (formData.type === 'PAYMENT' && isInstallmentPaid(transactions, instNum)) {
-        alert(`Esta parcela já está paga. O próximo pagamento pendente é a parcela ${getFirstUnpaidInstallment(transactions, maxInstallment)}.`);
+      if (formData.type === 'PAYMENT' && isInstallmentPaid(transactions, instNum, installmentAmount)) {
+        alert(`Esta parcela já está paga. O próximo pagamento pendente é a parcela ${getFirstUnpaidInstallment(transactions, maxInstallment, installmentAmount)}.`);
         setLoading(false);
         return;
       }

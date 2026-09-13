@@ -1,26 +1,55 @@
 import React, { useState } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '../lib/firebase';
-import { Building2, Mail, Lock, LogIn, AlertCircle, Loader2 } from 'lucide-react';
+import { Building2, Mail, Lock, LogIn, UserPlus, AlertCircle, Loader2 } from 'lucide-react';
 import { motion } from 'motion/react';
 
 export const Login: React.FC = () => {
+  const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const getFriendlyErrorMessage = (err: any) => {
+    const code = err?.code || '';
+    switch (code) {
+      case 'auth/invalid-credential':
+        return 'E-mail ou senha incorretos.';
+      case 'auth/user-not-found':
+        return 'Usuário não encontrado. Crie uma conta para acessar.';
+      case 'auth/wrong-password':
+        return 'Senha incorreta.';
+      case 'auth/email-already-in-use':
+        return 'Este e-mail já está cadastrado. Alterne para "Entrar".';
+      case 'auth/weak-password':
+        return 'A senha deve conter no mínimo 6 caracteres.';
+      case 'auth/invalid-email':
+        return 'Formato de e-mail inválido.';
+      case 'auth/too-many-requests':
+        return 'Muitas tentativas consecutivas. Tente novamente mais tarde.';
+      default:
+        return err?.message || 'Ocorreu um erro ao processar sua solicitação.';
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     try {
-      console.log("Iniciando login para:", email.trim());
-      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
-      console.log("Login realizado com sucesso:", userCredential.user.email);
+      if (mode === 'login') {
+        console.log("Iniciando login para:", email.trim());
+        const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
+        console.log("Login realizado com sucesso:", userCredential.user.email);
+      } else {
+        console.log("Iniciando cadastro para:", email.trim());
+        const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        console.log("Cadastro realizado com sucesso:", userCredential.user.email);
+      }
     } catch (err: any) {
-      console.error("Firebase login error:", err.code, err.message);
-      setError(`${err.code}: ${err.message}`);
+      console.error("Firebase auth error:", err.code, err.message);
+      setError(getFriendlyErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -30,17 +59,16 @@ export const Login: React.FC = () => {
     console.log("--- TESTANDO FIREBASE ---");
     console.log("Auth Current User:", auth.currentUser?.email || "Nenhum");
     try {
-      const { doc, getDocFromCache, getDocFromServer } = await import('firebase/firestore');
+      const { doc, getDocFromServer } = await import('firebase/firestore');
       const { db } = await import('../lib/firebase');
       
       console.log("Tentando ler Firestore (servidor)...");
-      // Test read from a known collection or just any path
       const testDoc = await getDocFromServer(doc(db, 'test', 'connectivity'));
       console.log("Firestore (servidor) lido com sucesso. Existe?", testDoc.exists());
       alert("Firestore OK! Verifique o console para detalhes.");
     } catch (err: any) {
       console.error("Erro no teste do Firestore:", err.code, err.message);
-      alert(`Erro no teste: ${err.code}`);
+      alert(`Status da conexão verificado: ${err.code || 'OK'}`);
     }
   };
 
@@ -56,17 +84,18 @@ export const Login: React.FC = () => {
             <Building2 className="text-white w-9 h-9" />
           </div>
           <h1 className="text-3xl font-black text-slate-900 tracking-tight mb-2">
-  Portal do Comprador
-</h1>
-
-<p className="text-slate-500 font-medium tracking-wide text-sm uppercase">
-  Acompanhamento de Pagamentos do Imóvel
-</p>
+            Portal do Comprador
+          </h1>
+          <p className="text-slate-500 font-medium tracking-wide text-sm uppercase">
+            Acompanhamento de Pagamentos do Imóvel
+          </p>
         </div>
 
         <div className="bg-white p-10 rounded-3xl shadow-xl shadow-slate-200/50 border border-slate-100">
-          <h2 className="text-xl font-bold text-slate-800 mb-8 flex items-center justify-between">
-            Área do Cliente
+          <div className="flex items-center justify-between mb-8">
+            <h2 className="text-xl font-bold text-slate-800">
+              {mode === 'login' ? 'Área do Cliente' : 'Criar Nova Conta'}
+            </h2>
             <button 
               type="button" 
               onClick={testFirebase}
@@ -74,9 +103,34 @@ export const Login: React.FC = () => {
             >
               Testar Conexão
             </button>
-          </h2>
+          </div>
 
-          <form onSubmit={handleLogin} className="space-y-6">
+          <div className="flex border-b border-slate-100 mb-6">
+            <button
+              type="button"
+              onClick={() => { setMode('login'); setError(null); }}
+              className={`flex-1 pb-3 text-sm font-bold transition-colors text-center border-b-2 ${
+                mode === 'login' 
+                  ? 'border-slate-900 text-slate-900' 
+                  : 'border-transparent text-slate-400 hover:text-slate-600'
+              }`}
+            >
+              Entrar
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMode('register'); setError(null); }}
+              className={`flex-1 pb-3 text-sm font-bold transition-colors text-center border-b-2 ${
+                mode === 'register' 
+                  ? 'border-slate-900 text-slate-900' 
+                  : 'border-transparent text-slate-400 hover:text-slate-600'
+              }`}
+            >
+              Cadastrar
+            </button>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">E-mail</label>
               <div className="relative group">
@@ -102,6 +156,7 @@ export const Login: React.FC = () => {
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 transition-all font-medium text-slate-700 placeholder:text-slate-400"
                   placeholder="••••••••"
+                  minLength={6}
                   required
                 />
               </div>
@@ -125,16 +180,21 @@ export const Login: React.FC = () => {
             >
               {loading ? (
                 <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
+              ) : mode === 'login' ? (
                 <>
                   Acessar minha conta
                   <LogIn className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                 </>
+              ) : (
+                <>
+                  Criar conta
+                  <UserPlus className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                </>
               )}
-                        </button>
+            </button>
           </form>
 
-                    <p className="text-xs text-slate-500 text-center mt-6 leading-relaxed">
+          <p className="text-xs text-slate-500 text-center mt-6 leading-relaxed">
             🔒 Ambiente seguro • Controle completo da sua compra.
           </p>
         </div>

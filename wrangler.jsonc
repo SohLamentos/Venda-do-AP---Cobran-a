@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "venda-apartamentos",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-03-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "venda-apartamentos-db",
+      "database_id": "venda-apartamentos-db-id"
+    }
+  ]
+  // R2 Bucket binding prepared for future receipts storage:
+  // "r2_buckets": [
+  //   {
+  //     "binding": "RECEIPTS",
+  //     "bucket_name": "venda-apartamentos-receipts"
+  //   }
+  // ]
+}

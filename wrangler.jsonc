@@ -16,7 +16,7 @@
     {
       "binding": "DB",
       "database_name": "venda-apartamentos-db",
-      "database_id": "venda-apartamentos-db-id"
+      "database_id": "9c9d38a5-d1ad-40ea-9ee5-a45f3c2696a7"
     }
   ]
   // R2 Bucket binding prepared for future receipts storage:

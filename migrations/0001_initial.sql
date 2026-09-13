@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS contracts (
   user_id TEXT,
   name TEXT NOT NULL,
   property_description TEXT,
-  financed_amount REAL NOT NULL DEFAULT 0,
-  fixed_installment REAL NOT NULL DEFAULT 0,
+  financed_amount INTEGER NOT NULL DEFAULT 0, -- Centavos (R$ * 100)
+  fixed_installment INTEGER NOT NULL DEFAULT 0, -- Centavos (R$ * 100)
   annual_interest_rate REAL NOT NULL DEFAULT 0,
   term_months INTEGER NOT NULL DEFAULT 0,
   start_date TEXT NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   contract_id TEXT NOT NULL,
   date TEXT NOT NULL,
   installment_number INTEGER NOT NULL,
-  amount REAL NOT NULL,
+  amount INTEGER NOT NULL, -- Centavos (R$ * 100)
   type TEXT NOT NULL CHECK (type IN ('PAYMENT', 'LANCE')),
   method TEXT NOT NULL DEFAULT 'PIX',
   observation TEXT,

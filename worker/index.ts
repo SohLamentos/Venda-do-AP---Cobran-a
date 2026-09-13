@@ -27,6 +27,21 @@ export interface Env {
 }
 
 /**
+ * Monetary conversion helpers:
+ * - Frontend operates in Reais (floating point, e.g. 1965.63)
+ * - Database stores in Centavos (INTEGER, e.g. 196563)
+ */
+export function moneyToCents(value: number | null | undefined): number {
+  if (value === null || value === undefined || isNaN(Number(value))) return 0;
+  return Math.round(Number(value) * 100);
+}
+
+export function centsToMoney(cents: number | null | undefined): number {
+  if (cents === null || cents === undefined || isNaN(Number(cents))) return 0;
+  return Number(cents) / 100;
+}
+
+/**
  * Frontend ContractConfig interface (camelCase)
  */
 export interface FrontendContractConfig {
@@ -50,8 +65,8 @@ export interface FrontendContractConfig {
  * Explicit mapping:
  *   user_id <-> ownerId
  *   property_description <-> propertyDescription
- *   financed_amount <-> financedAmount
- *   fixed_installment <-> fixedInstallment
+ *   financed_amount <-> financedAmount (cents to reais)
+ *   fixed_installment <-> fixedInstallment (cents to reais)
  *   annual_interest_rate <-> annualInterestRate
  *   term_months <-> termMonths
  *   start_date <-> startDate
@@ -65,8 +80,8 @@ export function mapContractDbToFrontend(row: Record<string, any>): FrontendContr
     id: row.id,
     name: row.name || '',
     propertyDescription: row.property_description ?? row.propertyDescription ?? '',
-    financedAmount: Number(row.financed_amount ?? row.financedAmount ?? 0),
-    fixedInstallment: Number(row.fixed_installment ?? row.fixedInstallment ?? 0),
+    financedAmount: centsToMoney(row.financed_amount ?? row.financedAmount ?? 0),
+    fixedInstallment: centsToMoney(row.fixed_installment ?? row.fixedInstallment ?? 0),
     annualInterestRate: Number(row.annual_interest_rate ?? row.annualInterestRate ?? 0),
     termMonths: Number(row.term_months ?? row.termMonths ?? 0),
     startDate: row.start_date || row.startDate || '',
@@ -80,6 +95,7 @@ export function mapContractDbToFrontend(row: Record<string, any>): FrontendContr
 
 /**
  * Maps incoming ContractConfig payload (camelCase, with snake_case fallback) to D1 fields (snake_case).
+ * Converts monetary values (financedAmount, fixedInstallment) to centavos (INTEGER).
  */
 export function mapContractFrontendToDb(payload: Record<string, any>, defaultId?: string) {
   const now = new Date().toISOString();
@@ -88,8 +104,8 @@ export function mapContractFrontendToDb(payload: Record<string, any>, defaultId?
     user_id: payload.ownerId ?? payload.userId ?? payload.user_id ?? null,
     name: payload.name || 'Novo Contrato',
     property_description: payload.propertyDescription ?? payload.property_description ?? '',
-    financed_amount: Number(payload.financedAmount ?? payload.financed_amount ?? 0),
-    fixed_installment: Number(payload.fixedInstallment ?? payload.fixed_installment ?? 0),
+    financed_amount: moneyToCents(payload.financedAmount ?? payload.financed_amount ?? 0),
+    fixed_installment: moneyToCents(payload.fixedInstallment ?? payload.fixed_installment ?? 0),
     annual_interest_rate: Number(payload.annualInterestRate ?? payload.annual_interest_rate ?? 0),
     term_months: Number(payload.termMonths ?? payload.term_months ?? 0),
     start_date: payload.startDate || payload.start_date || now.split('T')[0],
@@ -102,6 +118,7 @@ export function mapContractFrontendToDb(payload: Record<string, any>, defaultId?
 
 /**
  * Maps a D1 transaction row (snake_case) to Frontend Transaction (camelCase).
+ * Converts amount from centavos (INTEGER) to reais.
  */
 export function mapTransactionDbToFrontend(row: Record<string, any>) {
   return {
@@ -109,7 +126,7 @@ export function mapTransactionDbToFrontend(row: Record<string, any>) {
     contractId: row.contract_id ?? row.contractId,
     date: row.date,
     installmentNumber: Number(row.installment_number ?? row.installmentNumber ?? 1),
-    amount: Number(row.amount ?? 0),
+    amount: centsToMoney(row.amount ?? 0),
     type: (row.type === 'LANCE' ? 'LANCE' : 'PAYMENT') as 'PAYMENT' | 'LANCE',
     method: row.method || 'PIX',
     observation: row.observation ?? undefined,
@@ -125,6 +142,7 @@ export function mapTransactionDbToFrontend(row: Record<string, any>) {
 
 /**
  * Maps incoming Transaction payload (camelCase, with snake_case fallback) to D1 fields (snake_case).
+ * Converts amount to centavos (INTEGER).
  */
 export function mapTransactionFrontendToDb(payload: Record<string, any>, defaultId?: string) {
   const now = new Date().toISOString();
@@ -133,7 +151,7 @@ export function mapTransactionFrontendToDb(payload: Record<string, any>, default
     contract_id: payload.contractId ?? payload.contract_id ?? '',
     date: payload.date || now.split('T')[0],
     installment_number: Number(payload.installmentNumber ?? payload.installment_number ?? 1),
-    amount: Number(payload.amount ?? 0),
+    amount: moneyToCents(payload.amount ?? 0),
     type: payload.type === 'LANCE' ? 'LANCE' : 'PAYMENT',
     method: payload.method || 'PIX',
     observation: payload.observation ?? null,
@@ -189,17 +207,22 @@ export default {
       });
     }
 
-    // 2. Contracts endpoints (/api/v1/contracts)
+    // 2. Database Health check endpoint (read-only D1 connectivity & schema check)
+    if (pathname === '/api/v1/db/health' && request.method === 'GET') {
+      return handleDbHealth(env);
+    }
+
+    // 3. Contracts endpoints (/api/v1/contracts)
     if (pathname.startsWith('/api/v1/contracts')) {
       return handleContracts(request, env, url);
     }
 
-    // 3. Transactions endpoints (/api/v1/transactions)
+    // 4. Transactions endpoints (/api/v1/transactions)
     if (pathname.startsWith('/api/v1/transactions')) {
       return handleTransactions(request, env, url);
     }
 
-    // 4. Static assets handling (SPA fallback handled via Workers Static Assets)
+    // 5. Static assets handling (SPA fallback handled via Workers Static Assets)
     if (env.ASSETS) {
       return env.ASSETS.fetch(request);
     }
@@ -209,9 +232,73 @@ export default {
 };
 
 /**
+ * Handle database health check: strictly read-only, does not expose data.
+ */
+async function handleDbHealth(env: Env): Promise<Response> {
+  const databaseName = 'venda-apartamentos-db';
+  if (!env.DB) {
+    return jsonResponse(
+      {
+        ok: false,
+        database: databaseName,
+        connected: false,
+      },
+      503
+    );
+  }
+
+  try {
+    // 1. Connectivity test
+    await env.DB.prepare('SELECT 1').run();
+
+    // 2. Verify existence of required tables in sqlite_master
+    const requiredTables = ['users', 'contracts', 'transactions', 'audit_logs'];
+    const { results } = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'contracts', 'transactions', 'audit_logs')"
+    ).all();
+
+    const foundTables = (results || []).map((row: any) => row.name);
+    const schemaReady = requiredTables.every((t) => foundTables.includes(t));
+
+    return jsonResponse({
+      ok: true,
+      database: databaseName,
+      connected: true,
+      schemaReady,
+    });
+  } catch (_err) {
+    return jsonResponse(
+      {
+        ok: false,
+        database: databaseName,
+        connected: false,
+      },
+      503
+    );
+  }
+}
+
+/**
  * Handle contracts endpoints
  */
 async function handleContracts(request: Request, env: Env, url: URL): Promise<Response> {
+  // =========================================================================
+  // BARREIRA TEMPORÁRIA DE SEGURANÇA (FAIL-CLOSED)
+  // Até a etapa específica de autenticação/autorização (RBAC/JWT), os endpoints
+  // de contratos estão bloqueados para persistência em produção.
+  // =========================================================================
+  const D1_PERSISTENCE_ENABLED = false;
+  if (!D1_PERSISTENCE_ENABLED) {
+    return jsonResponse(
+      {
+        ok: false,
+        code: 'D1_PERSISTENCE_NOT_ENABLED',
+        message: 'Persistência D1 ainda não habilitada para produção.',
+      },
+      503
+    );
+  }
+
   if (!env.DB) {
     return jsonResponse(
       {
@@ -280,8 +367,8 @@ async function handleContracts(request: Request, env: Env, url: URL): Promise<Re
       const now = new Date().toISOString();
       const userId = body.ownerId ?? body.userId ?? body.user_id ?? null;
       const propDesc = body.propertyDescription ?? body.property_description ?? null;
-      const financedAmount = body.financedAmount !== undefined ? Number(body.financedAmount) : (body.financed_amount !== undefined ? Number(body.financed_amount) : null);
-      const fixedInstallment = body.fixedInstallment !== undefined ? Number(body.fixedInstallment) : (body.fixed_installment !== undefined ? Number(body.fixed_installment) : null);
+      const financedAmount = body.financedAmount !== undefined ? moneyToCents(body.financedAmount) : (body.financed_amount !== undefined ? Number(body.financed_amount) : null);
+      const fixedInstallment = body.fixedInstallment !== undefined ? moneyToCents(body.fixedInstallment) : (body.fixed_installment !== undefined ? Number(body.fixed_installment) : null);
       const annualRate = body.annualInterestRate !== undefined ? Number(body.annualInterestRate) : (body.annual_interest_rate !== undefined ? Number(body.annual_interest_rate) : null);
       const termMonths = body.termMonths !== undefined ? Number(body.termMonths) : (body.term_months !== undefined ? Number(body.term_months) : null);
       const startDate = body.startDate ?? body.start_date ?? null;
@@ -330,6 +417,23 @@ async function handleContracts(request: Request, env: Env, url: URL): Promise<Re
  * Handle transactions endpoints
  */
 async function handleTransactions(request: Request, env: Env, url: URL): Promise<Response> {
+  // =========================================================================
+  // BARREIRA TEMPORÁRIA DE SEGURANÇA (FAIL-CLOSED)
+  // Até a etapa específica de autenticação/autorização (RBAC/JWT), os endpoints
+  // de transações estão bloqueados para persistência em produção.
+  // =========================================================================
+  const D1_PERSISTENCE_ENABLED = false;
+  if (!D1_PERSISTENCE_ENABLED) {
+    return jsonResponse(
+      {
+        ok: false,
+        code: 'D1_PERSISTENCE_NOT_ENABLED',
+        message: 'Persistência D1 ainda não habilitada para produção.',
+      },
+      503
+    );
+  }
+
   if (!env.DB) {
     return jsonResponse(
       {
@@ -413,3 +517,4 @@ async function handleTransactions(request: Request, env: Env, url: URL): Promise
     return jsonResponse({ ok: false, error: err?.message || 'Internal server error' }, 500);
   }
 }
+

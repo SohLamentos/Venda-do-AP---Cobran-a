@@ -9,7 +9,7 @@
     "preview": "vite preview --port=3000 --host=0.0.0.0",
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test:auth": "tsx scripts/test-auth-ownership.ts",
+    "test:auth": "tsx scripts/test-cloudflare-auth.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },

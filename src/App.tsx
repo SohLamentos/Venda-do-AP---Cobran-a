@@ -154,7 +154,7 @@ function getCurrentBalance(schedule: AmortizationRow[], transactions: Transactio
 }
 
 export default function App() {
-  const { user, loading } = useFirebase();
+  const { user, loading, logout } = useFirebase();
   const [contractsList, setContractsList] = React.useState<{ id: string; name: string }[]>([]);
   const [activeContractId, setActiveContractId] = React.useState<string>(() => {
     return localStorage.getItem('active_contract_id') || '';
@@ -734,7 +734,7 @@ export default function App() {
               Novo Lançamento
              </button>
              <button 
-              onClick={() => signOut(auth)}
+              onClick={() => logout()}
               className="p-2 text-slate-400 hover:text-rose-600 transition-colors"
               title="Sair"
             >

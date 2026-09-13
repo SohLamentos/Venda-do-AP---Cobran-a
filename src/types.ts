@@ -58,3 +58,10 @@ export interface BCBTRPoint {
   data: string; // dd/MM/yyyy
   valor: string; // daily rate
 }
+
+export interface CloudflareUser {
+  id: string;
+  email: string;
+  name: string | null;
+  role: 'ADMIN' | 'CLIENT';
+}

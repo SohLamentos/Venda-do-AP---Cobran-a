@@ -1,57 +1,99 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { User, onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../lib/firebase';
-import { doc, getDocFromServer } from 'firebase/firestore';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { apiService } from '../services/apiService';
+import { CloudflareUser } from '../types';
 
-interface FirebaseContextType {
-  user: User | null;
+export interface AuthContextType {
+  user: {
+    uid: string;
+    email: string | null;
+    name?: string | null;
+    role: 'ADMIN' | 'CLIENT';
+  } | null;
+  cloudflareUser: CloudflareUser | null;
   loading: boolean;
+  login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
-const FirebaseContext = createContext<FirebaseContextType>({ user: null, loading: true });
+const AuthContext = createContext<AuthContextType>({
+  user: null,
+  cloudflareUser: null,
+  loading: true,
+  login: async () => ({ ok: false }),
+  logout: async () => {},
+  refreshUser: async () => {},
+});
 
-export const useFirebase = () => useContext(FirebaseContext);
+export const useFirebase = () => useContext(AuthContext);
+export const useAuth = () => useContext(AuthContext);
 
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [cloudflareUser, setCloudflareUser] = useState<CloudflareUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    // Validate connection to Firestore as per CRITICAL requirement
-    const testConnection = async () => {
-      try {
-        await getDocFromServer(doc(db, 'test', 'connection'));
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration (client is offline).");
-        }
+  const refreshUser = useCallback(async () => {
+    try {
+      const res = await apiService.getAuthMe();
+      if (res.ok && res.user) {
+        setCloudflareUser(res.user);
+      } else {
+        setCloudflareUser(null);
       }
-    };
-    testConnection();
-
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      console.log("Firebase auth state changed:", user ? `Authenticated: ${user.email}` : "Not Authenticated");
-      setUser(user);
+    } catch (_err) {
+      setCloudflareUser(null);
+    } finally {
       setLoading(false);
-    });
-
-    // Safety timeout: if auth state doesn't resolve in 10s, stop loading
-    const timer = setTimeout(() => {
-      if (loading) {
-        console.warn("Auth state resolution timed out.");
-        setLoading(false);
-      }
-    }, 10000);
-
-    return () => {
-      unsubscribe();
-      clearTimeout(timer);
-    };
+    }
   }, []);
 
+  useEffect(() => {
+    // Initial session restore via GET /api/v1/auth/me (HttpOnly cookie)
+    refreshUser();
+  }, [refreshUser]);
+
+  const login = async (email: string, password: string): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await apiService.login(email, password);
+      if (res.ok && res.user) {
+        setCloudflareUser(res.user);
+        return { ok: true };
+      }
+      return { ok: false, error: res.message || res.code || 'Credenciais inválidas' };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Erro de conexão com o servidor' };
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await apiService.logout();
+    } finally {
+      setCloudflareUser(null);
+    }
+  };
+
+  const user = cloudflareUser
+    ? {
+        uid: cloudflareUser.id,
+        email: cloudflareUser.email,
+        name: cloudflareUser.name,
+        role: cloudflareUser.role,
+      }
+    : null;
+
   return (
-    <FirebaseContext.Provider value={{ user, loading }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        cloudflareUser,
+        loading,
+        login,
+        logout,
+        refreshUser,
+      }}
+    >
       {children}
-    </FirebaseContext.Provider>
+    </AuthContext.Provider>
   );
 };

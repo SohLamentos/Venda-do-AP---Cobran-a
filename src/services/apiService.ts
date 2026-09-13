@@ -6,6 +6,8 @@
  */
 
 import { ContractConfig, Transaction } from '../types';
+import { User, onAuthStateChanged } from 'firebase/auth';
+import { auth } from '../lib/firebase';
 
 export interface HealthResponse {
   ok: boolean;
@@ -18,11 +20,66 @@ export interface ApiResponse<T = any> {
   data?: T;
   id?: string;
   error?: string;
+  code?: string;
   message?: string;
+}
+
+export interface AuthMeResponse {
+  ok: boolean;
+  user?: {
+    id: string;
+    email: string;
+    name: string | null;
+    role: string;
+  };
+  code?: string;
 }
 
 class ApiService {
   private baseUrl = '/api/v1';
+
+  /**
+   * Performs an authenticated fetch with Firebase ID Token
+   * Includes one-time token refresh retry on 401.
+   */
+  async apiFetchAuthenticated(user: User, endpoint: string, init?: RequestInit): Promise<Response> {
+    let token = await user.getIdToken();
+    let res = await fetch(`${this.baseUrl}${endpoint}`, {
+      ...init,
+      headers: {
+        ...init?.headers,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    // If 401, retry once with forced refreshed token
+    if (res.status === 401) {
+      token = await user.getIdToken(true);
+      res = await fetch(`${this.baseUrl}${endpoint}`, {
+        ...init,
+        headers: {
+          ...init?.headers,
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    }
+
+    return res;
+  }
+
+  /**
+   * Calls GET /api/v1/auth/me to validate Worker authentication
+   * and idempotently synchronize user in D1 users table.
+   */
+  async getAuthMe(user: User): Promise<AuthMeResponse> {
+    try {
+      const res = await this.apiFetchAuthenticated(user, '/auth/me');
+      return await res.json();
+    } catch (err) {
+      console.warn('[ApiService] /api/v1/auth/me call error:', err);
+      return { ok: false, code: 'NETWORK_ERROR' };
+    }
+  }
 
   /**
    * Health check endpoint
@@ -105,3 +162,25 @@ class ApiService {
 }
 
 export const apiService = new ApiService();
+
+// Lightweight background synchronization with D1 users on Firebase authentication
+let lastSyncedUid: string | null = null;
+if (typeof window !== 'undefined') {
+  onAuthStateChanged(auth, async (user) => {
+    if (user && user.uid !== lastSyncedUid) {
+      lastSyncedUid = user.uid;
+      try {
+        const result = await apiService.getAuthMe(user);
+        if (result.ok) {
+          console.log('[D1 Users] Synchronized authenticated user with D1:', result.user?.id);
+        } else {
+          console.warn('[D1 Users] Synchronization returned:', result);
+        }
+      } catch (err) {
+        console.warn('[D1 Users] Synchronization error:', err);
+      }
+    } else if (!user) {
+      lastSyncedUid = null;
+    }
+  });
+}

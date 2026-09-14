@@ -1013,6 +1013,155 @@ async function handleAdminBootstrap(request: Request, env: Env): Promise<Respons
 }
 
 /**
+ * POST /api/v1/admin/emergency-reset-password
+ * Mecanismo seguro e temporário para redefinição da senha do usuário admin existente.
+ * Requisitos estritos:
+ * - Exige ADMIN_BOOTSTRAP_TOKEN
+ * - Funciona somente se login === "admin"
+ * - Funciona somente enquanto existir exatamente um ADMIN
+ * - Gera o password_hash dentro do Worker (via hashPassword)
+ * - Atualiza somente password_hash e updated_at
+ * - Revoga auth_sessions existentes desse usuário
+ * - Registra ADMIN_PASSWORD_RESET em audit_logs
+ * - Nunca retorna password_hash
+ * - Nunca registra senha em log
+ * - Nunca retorna senha
+ * - Fail-closed
+ */
+async function handleAdminEmergencyResetPassword(request: Request, env: Env): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Database not available' }, 503, request, env);
+    }
+
+    // 1. Validação estrita do token de bootstrap (Bearer token)
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return jsonResponse({ ok: false, code: 'UNAUTHORIZED', message: 'Token de bootstrap ausente.' }, 401, request, env);
+    }
+
+    const token = authHeader.substring(7).trim();
+    const expectedToken = env.ADMIN_BOOTSTRAP_TOKEN ? env.ADMIN_BOOTSTRAP_TOKEN.trim() : '';
+    if (!expectedToken || token !== expectedToken) {
+      return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Token de bootstrap inválido ou não configurado.' }, 403, request, env);
+    }
+
+    // 2. Validação do body (senha recebida no request HTTPS)
+    let body: any;
+    try {
+      body = await request.json();
+    } catch (_e) {
+      return jsonResponse({ ok: false, code: 'INVALID_REQUEST', message: 'JSON inválido' }, 400, request, env);
+    }
+
+    const targetLogin = typeof body?.login === 'string' ? body.login.trim().toLowerCase() : '';
+    const newPassword = body?.newPassword ?? body?.password ?? body?.new_password;
+
+    // Funciona SOMENTE para login === "admin"
+    if (targetLogin !== 'admin') {
+      return jsonResponse(
+        { ok: false, code: 'INVALID_LOGIN', message: 'Este endpoint só permite redefinir a senha do login admin.' },
+        400,
+        request,
+        env
+      );
+    }
+
+    const policy = validatePasswordPolicy(newPassword);
+    if (!policy.valid) {
+      return jsonResponse({ ok: false, code: 'INVALID_PASSWORD', message: policy.error }, 400, request, env);
+    }
+
+    // 3. Funciona somente se existir EXATAMENTE UM administrador no sistema
+    const adminCountResult = await env.DB
+      .prepare("SELECT COUNT(*) as total FROM users WHERE role = 'ADMIN'")
+      .first<{ total: number }>();
+    const totalAdmins = Number(adminCountResult?.total ?? 0);
+
+    if (totalAdmins !== 1) {
+      return jsonResponse(
+        {
+          ok: false,
+          code: 'PRECONDITION_FAILED',
+          message: 'O reset de emergência só é permitido quando existe exatamente um administrador.',
+        },
+        412,
+        request,
+        env
+      );
+    }
+
+    // 4. Buscar o usuário admin
+    const adminUser = await env.DB
+      .prepare("SELECT id, login, role, status FROM users WHERE login = 'admin' AND role = 'ADMIN'")
+      .first<{ id: string; login: string; role: string; status: string }>();
+
+    if (!adminUser) {
+      return jsonResponse(
+        { ok: false, code: 'NOT_FOUND', message: 'Usuário admin não encontrado.' },
+        404,
+        request,
+        env
+      );
+    }
+
+    // 5. Gerar o password_hash estritamente pela rotina oficial hashPassword do Worker
+    const newPasswordHash = await hashPassword(newPassword);
+
+    // 6. Atualizar SOMENTE password_hash e updated_at
+    await env.DB
+      .prepare("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?")
+      .bind(newPasswordHash, adminUser.id)
+      .run();
+
+    // 7. Revogar auth_sessions existentes desse usuário
+    await env.DB
+      .prepare("UPDATE auth_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL")
+      .bind(adminUser.id)
+      .run();
+
+    // 8. Registrar ADMIN_PASSWORD_RESET em audit_logs (sem nunca registrar ou imprimir a senha)
+    const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || '127.0.0.1';
+    await logAuditEvent(
+      env.DB,
+      adminUser.id,
+      'ADMIN_PASSWORD_RESET',
+      'Senha do administrador redefinida via emergency-reset-password com ADMIN_BOOTSTRAP_TOKEN',
+      clientIp
+    );
+
+    // 9. Resposta de sucesso segura: nunca retorna password_hash nem senha
+    return jsonResponse(
+      {
+        ok: true,
+        message: 'Senha do administrador redefinida com sucesso.',
+        user: {
+          id: adminUser.id,
+          login: adminUser.login,
+          role: adminUser.role,
+          status: adminUser.status,
+        },
+      },
+      200,
+      request,
+      env
+    );
+  } catch (err: any) {
+    console.error('[AdminEmergencyResetPassword] Erro:', err);
+    return jsonResponse(
+      {
+        ok: false,
+        code: 'INTERNAL_ERROR',
+        message: 'Erro interno ao redefinir a senha do administrador.',
+      },
+      500,
+      request,
+      env
+    );
+  }
+}
+
+/**
  * GET /api/v1/admin/users
  */
 async function handleAdminUsersGet(request: Request, env: Env): Promise<Response> {
@@ -1643,6 +1792,11 @@ export default {
       // 3. Admin Bootstrap (Temporário para criação do 1º ADMIN)
       if (pathname === '/api/v1/admin/bootstrap' && request.method === 'POST') {
         return handleAdminBootstrap(request, env);
+      }
+
+      // 3b. Admin Password Reset de Emergência (Protegido por ADMIN_BOOTSTRAP_TOKEN)
+      if (pathname === '/api/v1/admin/emergency-reset-password' && request.method === 'POST') {
+        return handleAdminEmergencyResetPassword(request, env);
       }
 
       // 4. Admin Users Management

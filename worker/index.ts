@@ -597,6 +597,18 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     .bind(login, login)
     .first<DbUser>();
 
+  const storedHashParts = user?.password_hash ? user.password_hash.split('$').length : 0;
+  const storedHashPrefix = user?.password_hash ? user.password_hash.split('$')[0] : '';
+  console.log('[LoginDiag]', {
+    userFound: !!user,
+    role: user?.role,
+    status: user?.status,
+    storedHashPresent: !!user?.password_hash,
+    storedHashPrefix,
+    storedHashParts,
+    passwordLength: password ? password.length : 0,
+  });
+
   // 3. Timing attack protection & anti-enumeração:
   // Se usuário não existe ou está desativado (DISABLED), executa PBKDF2 equiparável e retorna sempre 401 INVALID_CREDENTIALS
   if (!user || user.status === 'DISABLED') {
@@ -613,6 +625,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
 
   // 4. Verificação da senha real
   const passwordValid = await verifyPassword(password, user.password_hash);
+  console.log('[LoginDiag] verifyResult:', passwordValid);
   if (!passwordValid) {
     await recordLoginAttempt(env.DB, login, clientIp, false);
     await logAuditEvent(env.DB, user.id, 'LOGIN_FAILED', `Senha incorreta para usuário ${login}`, clientIp);

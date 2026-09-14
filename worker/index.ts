@@ -49,6 +49,7 @@ export interface SessionUser {
   email: string | null;
   name: string | null;
   role: 'ADMIN' | 'SELLER' | 'BUYER';
+  status?: 'ACTIVE' | 'DISABLED';
   sessionId?: string;
   tokenHash?: string;
 }
@@ -506,6 +507,7 @@ export async function requireSessionUser(request: Request, env: Env): Promise<Se
     email: sessionRow.email,
     name: sessionRow.name,
     role: sessionRow.role,
+    status: sessionRow.status,
     sessionId: sessionRow.session_id,
     tokenHash: sessionRow.token_hash,
   };
@@ -714,6 +716,7 @@ async function handleAuthMe(request: Request, env: Env): Promise<Response> {
           name: user.name,
           email: user.email,
           role: user.role,
+          status: user.status,
         },
       },
       200,
@@ -994,8 +997,14 @@ async function handleAdminBootstrap(request: Request, env: Env): Promise<Respons
     );
   } catch (err: any) {
     console.error('[AdminBootstrap] Erro:', err);
+    const errorMessage = err instanceof Error ? err.message : String(err || 'Erro interno');
     return jsonResponse(
-      { ok: false, code: 'INTERNAL_ERROR', message: 'Erro ao processar criação do administrador.' },
+      { 
+        ok: false, 
+        code: 'INTERNAL_ERROR', 
+        message: 'Erro ao processar criação do administrador.',
+        details: errorMessage 
+      },
       500,
       request,
       env

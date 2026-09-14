@@ -5,6 +5,7 @@ import {
   Lock, 
   Mail, 
   User, 
+  AtSign,
   KeyRound, 
   Loader2, 
   AlertCircle, 
@@ -22,6 +23,7 @@ interface AdminBootstrapProps {
 
 export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogin }) => {
   const [name, setName] = useState('');
+  const [login, setLogin] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -46,13 +48,26 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
       return 'O nome do administrador é obrigatório.';
     }
 
-    const trimmedEmail = email.trim();
-    if (!trimmedEmail) {
-      return 'O e-mail é obrigatório.';
+    const trimmedLogin = login.trim().toLowerCase();
+    if (!trimmedLogin) {
+      return 'O login (usuário) é obrigatório.';
     }
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(trimmedEmail)) {
-      return 'Informe um e-mail válido.';
+    if (trimmedLogin.length < 3 || trimmedLogin.length > 50) {
+      return 'O login deve ter entre 3 e 50 caracteres.';
+    }
+    if (/\s/.test(trimmedLogin)) {
+      return 'O login não pode conter espaços.';
+    }
+    if (!/^[a-z0-9._-]+$/.test(trimmedLogin)) {
+      return 'O login pode conter apenas letras minúsculas, números, ponto (.), traço (-) e sublinhado (_).';
+    }
+
+    const trimmedEmail = email.trim();
+    if (trimmedEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(trimmedEmail)) {
+        return 'Informe um e-mail válido ou deixe o campo em branco.';
+      }
     }
 
     if (password.length < 10) {
@@ -94,24 +109,22 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
     setLoading(true);
 
     try {
-      // Direct call to POST /api/v1/admin/bootstrap
-      // Header: Authorization: Bearer <bootstrapToken>
-      // Body: { email, name, password }
-      // The bootstrapToken is NEVER sent in the body, nor stored in client storage
       const res = await apiService.adminBootstrap(
         {
-          email: email.trim(),
+          login: login.trim().toLowerCase(),
           name: name.trim(),
+          email: email.trim() || undefined,
           password,
         },
         bootstrapToken.trim()
       );
 
-      if (res.ok && res.status === 201) {
+      if (res.ok && (res.status === 201 || (res as any).user)) {
         setSuccessUser({
           id: res.user?.id || '',
-          email: res.user?.email || email.trim(),
+          login: res.user?.login || login.trim().toLowerCase(),
           name: res.user?.name || name.trim(),
+          email: res.user?.email || (email.trim() || null),
           role: 'ADMIN',
           status: 'ACTIVE',
         });
@@ -121,19 +134,23 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
         setConfirmPassword('');
         setBootstrapToken('');
         setName('');
+        setLogin('');
         setEmail('');
         setError(null);
       } else if (res.status === 409 || res.code === 'ADMIN_ALREADY_EXISTS') {
         setIsBlockedAlreadyExists(true);
-        setError('O administrador inicial já foi criado. O bootstrap está desativado.');
-        // Wipe sensitive credentials
+        setError('O primeiro administrador já foi criado no sistema. O bootstrap está desativado.');
         setPassword('');
         setConfirmPassword('');
         setBootstrapToken('');
-      } else if (res.status === 401 || res.status === 403) {
-        setError('Não foi possível autorizar o bootstrap.');
+      } else if (res.status === 401 || res.status === 403 || res.code === 'FORBIDDEN' || res.code === 'UNAUTHORIZED') {
+        setError('Token de bootstrap inválido ou não configurado no Cloudflare (ADMIN_BOOTSTRAP_TOKEN).');
+      } else if (res.code === 'LOGIN_ALREADY_EXISTS') {
+        setError('Este login de usuário já está em uso.');
+      } else if (res.code === 'EMAIL_ALREADY_EXISTS') {
+        setError('Este endereço de e-mail já está cadastrado.');
       } else {
-        setError(res.error || 'Não foi possível completar o bootstrap do administrador.');
+        setError(res.message || res.error || 'Não foi possível completar o bootstrap do administrador.');
       }
     } catch (_err) {
       setError('Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.');
@@ -162,7 +179,7 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
             Bootstrap de Administrador
           </h1>
           <p className="text-slate-500 font-medium text-xs sm:text-sm mt-1 max-w-md">
-            Criação exclusiva do primeiro usuário ADMIN para gestão no Cloudflare D1
+            Criação exclusiva do primeiro usuário ADMIN no Cloudflare D1
           </p>
         </div>
 
@@ -180,25 +197,29 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
 
               <div className="space-y-2">
                 <h2 className="text-xl font-black text-slate-900">
-                  Administrador criado com sucesso.
+                  Administrador criado com sucesso!
                 </h2>
                 <p className="text-sm text-slate-500">
-                  O primeiro acesso de gestão foi registrado com segurança no banco de dados.
+                  O primeiro acesso administrativo foi registrado com segurança no banco de dados.
                 </p>
               </div>
 
-              {/* Verified details (without any sensitive hash or token) */}
+              {/* Verified details */}
               <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 text-left space-y-2.5 text-sm">
                 <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
                   <span className="text-slate-500 font-medium">Nome:</span>
                   <span className="font-semibold text-slate-800">{successUser.name || '—'}</span>
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
+                  <span className="text-slate-500 font-medium">Login:</span>
+                  <span className="font-bold text-indigo-700">{successUser.login}</span>
+                </div>
+                <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
                   <span className="text-slate-500 font-medium">E-mail:</span>
-                  <span className="font-semibold text-slate-800">{successUser.email}</span>
+                  <span className="font-semibold text-slate-800">{successUser.email || 'Não informado (opcional)'}</span>
                 </div>
                 <div className="flex justify-between items-center py-1">
-                  <span className="text-slate-500 font-medium">Perfil (Role):</span>
+                  <span className="text-slate-500 font-medium">Perfil:</span>
                   <span className="inline-flex items-center gap-1 font-bold text-xs uppercase bg-indigo-50 text-indigo-700 px-2.5 py-0.5 rounded-full border border-indigo-200">
                     <ShieldCheck className="w-3.5 h-3.5" />
                     {successUser.role}
@@ -210,10 +231,10 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                 <button
                   type="button"
                   onClick={handleGoToLogin}
-                  className="w-full bg-slate-900 hover:bg-black text-white py-3.5 px-6 rounded-2xl font-bold tracking-tight shadow-lg shadow-slate-200 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full bg-slate-900 hover:bg-black text-white py-3.5 px-6 rounded-2xl font-bold tracking-tight shadow-lg shadow-slate-200 transition-all flex items-center justify-center gap-2 cursor-pointer text-sm"
                 >
                   <ArrowLeft className="w-4 h-4" />
-                  IR PARA LOGIN
+                  IR PARA O LOGIN
                 </button>
               </div>
             </motion.div>
@@ -229,16 +250,16 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                       Bootstrap Desativado
                     </h2>
                     <p className="text-sm text-slate-600 leading-relaxed">
-                      O administrador inicial já foi criado. O bootstrap está desativado.
+                      O primeiro administrador já foi cadastrado no sistema. O provisionamento por token foi permanentemente desativado.
                     </p>
                   </div>
                   <button
                     type="button"
                     onClick={handleGoToLogin}
-                    className="w-full bg-slate-900 hover:bg-black text-white py-3.5 px-6 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
+                    className="w-full bg-slate-900 hover:bg-black text-white py-3.5 px-6 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 cursor-pointer text-sm"
                   >
                     <ArrowLeft className="w-4 h-4" />
-                    IR PARA LOGIN
+                    IR PARA O LOGIN
                   </button>
                 </div>
               ) : (
@@ -246,14 +267,14 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-600 flex items-start gap-2.5">
                     <Info className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
                     <p className="leading-relaxed">
-                      Esta interface realiza exclusivamente o provisionamento inicial do primeiro administrador. Credenciais nunca são salvas no navegador.
+                      Esta interface realiza exclusivamente o provisionamento inicial do primeiro administrador. Demais usuários são geridos pelo painel após o login.
                     </p>
                   </div>
 
                   {/* Nome do Administrador */}
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-600 uppercase tracking-wider ml-1">
-                      Nome do Administrador
+                      Nome Completo
                     </label>
                     <div className="relative group">
                       <User className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-indigo-600 transition-colors" />
@@ -262,18 +283,45 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                         value={name}
                         onChange={(e) => setName(e.target.value)}
                         disabled={loading}
-                        className="w-full pl-10 pr-3.5 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
-                        placeholder="Nome completo do administrador"
+                        className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
+                        placeholder="Nome do administrador"
                         required
                       />
                     </div>
                   </div>
 
-                  {/* E-mail */}
+                  {/* Login (Usuário) */}
                   <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-600 uppercase tracking-wider ml-1">
-                      E-mail
-                    </label>
+                    <div className="flex items-center justify-between ml-1">
+                      <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+                        Login (Usuário)
+                      </label>
+                      <span className="text-[10px] text-slate-400 font-medium">Usado para login</span>
+                    </div>
+                    <div className="relative group">
+                      <AtSign className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-indigo-600 transition-colors" />
+                      <input
+                        type="text"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        value={login}
+                        onChange={(e) => setLogin(e.target.value.toLowerCase().replace(/\s+/g, ''))}
+                        disabled={loading}
+                        className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
+                        placeholder="admin"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  {/* E-mail (Opcional) */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between ml-1">
+                      <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+                        E-mail
+                      </label>
+                      <span className="text-[10px] text-slate-400 font-medium">Opcional</span>
+                    </div>
                     <div className="relative group">
                       <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-indigo-600 transition-colors" />
                       <input
@@ -281,9 +329,8 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
                         disabled={loading}
-                        className="w-full pl-10 pr-3.5 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
-                        placeholder="admin@incorporadora.com"
-                        required
+                        className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
+                        placeholder="admin@empresa.com (opcional)"
                       />
                     </div>
                   </div>
@@ -291,7 +338,7 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                   {/* Senha */}
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-600 uppercase tracking-wider ml-1">
-                      Senha
+                      Senha Inicial
                     </label>
                     <div className="relative group">
                       <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-indigo-600 transition-colors" />
@@ -301,7 +348,7 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         disabled={loading}
-                        className="w-full pl-10 pr-3.5 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
+                        className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
                         placeholder="Mínimo 10 caracteres (letras e números)"
                         required
                       />
@@ -321,7 +368,7 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                         value={confirmPassword}
                         onChange={(e) => setConfirmPassword(e.target.value)}
                         disabled={loading}
-                        className="w-full pl-10 pr-3.5 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
+                        className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-medium text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
                         placeholder="Repita a senha digitada"
                         required
                       />
@@ -331,20 +378,20 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                   {/* ADMIN_BOOTSTRAP_TOKEN */}
                   <div className="space-y-1.5 pt-1">
                     <div className="flex items-center justify-between ml-1">
-                      <label className="text-xs font-bold text-indigo-900 uppercase tracking-wider">
+                      <label className="text-xs font-bold text-indigo-950 uppercase tracking-wider">
                         ADMIN_BOOTSTRAP_TOKEN
                       </label>
-                      <span className="text-[10px] text-slate-400 font-medium">Secret do Cloudflare</span>
+                      <span className="text-[10px] text-slate-400 font-medium">Secret configurado no Cloudflare</span>
                     </div>
                     <div className="relative group">
-                      <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-indigo-400 group-focus-within:text-indigo-600 transition-colors" />
+                      <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-indigo-500 group-focus-within:text-indigo-700 transition-colors" />
                       <input
                         type="password"
                         autoComplete="off"
                         value={bootstrapToken}
                         onChange={(e) => setBootstrapToken(e.target.value)}
                         disabled={loading}
-                        className="w-full pl-10 pr-3.5 py-3 bg-indigo-50/40 border border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-mono text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
+                        className="w-full pl-10 pr-3.5 py-2.5 bg-indigo-50/40 border border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-sm font-mono text-slate-800 placeholder:text-slate-400 disabled:opacity-60"
                         placeholder="••••••••••••••••••••••••••••••••"
                         required
                       />
@@ -366,7 +413,7 @@ export const AdminBootstrap: React.FC<AdminBootstrapProps> = ({ onNavigateToLogi
                     <button
                       type="submit"
                       disabled={loading || isBlockedAlreadyExists}
-                      className="w-full bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white py-3.5 px-6 rounded-2xl font-bold text-sm tracking-tight shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2 disabled:opacity-60 cursor-pointer"
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white py-3.5 px-6 rounded-2xl font-bold text-sm tracking-tight shadow-md shadow-indigo-200 transition-all flex items-center justify-center gap-2 disabled:opacity-60 cursor-pointer"
                     >
                       {loading ? (
                         <>

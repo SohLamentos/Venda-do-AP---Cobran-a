@@ -59,9 +59,17 @@ export interface BCBTRPoint {
   valor: string; // daily rate
 }
 
+export type UserRole = 'ADMIN' | 'SELLER' | 'BUYER';
+export type UserStatus = 'ACTIVE' | 'DISABLED';
+
 export interface CloudflareUser {
   id: string;
-  email: string;
+  login: string;
+  email?: string | null;
   name: string | null;
-  role: 'ADMIN' | 'CLIENT';
+  role: UserRole;
+  status?: UserStatus;
+  createdAt?: string;
+  updatedAt?: string;
+  lastLoginAt?: string | null;
 }

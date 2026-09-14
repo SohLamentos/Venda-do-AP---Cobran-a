@@ -47,14 +47,14 @@ class ApiService {
 
   /**
    * Cloudflare Native Login (POST /api/v1/auth/login)
-   * Sends credentials and receives HttpOnly session cookie
+   * Sends login (username) + password and receives HttpOnly session cookie
    */
-  async login(email: string, password: string): Promise<ApiResponse> {
+  async login(login: string, password: string): Promise<ApiResponse> {
     const res = await fetch(`${this.baseUrl}/auth/login`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ login: login.trim().toLowerCase(), password }),
     });
     return res.json();
   }
@@ -109,9 +109,9 @@ class ApiService {
    * Uses existing worker endpoint with Authorization: Bearer <bootstrapToken>
    */
   async adminBootstrap(
-    payload: { email: string; name?: string; password: string },
+    payload: { login: string; name?: string; email?: string; password: string },
     bootstrapToken: string
-  ): Promise<{ ok: boolean; status: number; user?: CloudflareUser; code?: string; error?: string }> {
+  ): Promise<{ ok: boolean; status: number; user?: CloudflareUser; code?: string; error?: string; message?: string }> {
     const res = await fetch(`${this.baseUrl}/admin/bootstrap`, {
       method: 'POST',
       headers: {
@@ -119,8 +119,9 @@ class ApiService {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        email: payload.email.trim(),
+        login: payload.login.trim().toLowerCase(),
         name: payload.name?.trim() || undefined,
+        email: payload.email?.trim() || undefined,
         password: payload.password,
       }),
     });
@@ -144,14 +145,39 @@ class ApiService {
   }
 
   /**
-   * Admin: Create Client (POST /api/v1/admin/users)
+   * Admin: Create User (POST /api/v1/admin/users)
    */
-  async adminCreateUser(payload: { email: string; name?: string; password: string; role?: 'CLIENT' }): Promise<ApiResponse> {
+  async adminCreateUser(payload: {
+    login: string;
+    name: string;
+    email?: string;
+    password: string;
+    role: 'ADMIN' | 'SELLER' | 'BUYER';
+  }): Promise<ApiResponse> {
     const res = await fetch(`${this.baseUrl}/admin/users`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, role: 'CLIENT' }),
+      body: JSON.stringify({
+        login: payload.login.trim().toLowerCase(),
+        name: payload.name.trim(),
+        email: payload.email?.trim() || undefined,
+        password: payload.password,
+        role: payload.role,
+      }),
+    });
+    return res.json();
+  }
+
+  /**
+   * Admin: Update user role (PATCH /api/v1/admin/users/:id/role)
+   */
+  async adminUpdateUserRole(id: string, role: 'ADMIN' | 'SELLER' | 'BUYER'): Promise<ApiResponse> {
+    const res = await fetch(`${this.baseUrl}/admin/users/${encodeURIComponent(id)}/role`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
     });
     return res.json();
   }
@@ -178,6 +204,22 @@ class ApiService {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ newPassword }),
+    });
+    return res.json();
+  }
+
+  /**
+   * Admin: Update user profile details (PATCH /api/v1/admin/users/:id)
+   */
+  async adminUpdateUser(
+    id: string,
+    payload: { name?: string; login?: string; email?: string }
+  ): Promise<ApiResponse> {
+    const res = await fetch(`${this.baseUrl}/admin/users/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
     return res.json();
   }

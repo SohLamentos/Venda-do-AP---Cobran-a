@@ -38,6 +38,8 @@ import { ContractConfig, Transaction, AmortizationRow } from './types';
 import { useFirebase } from './components/FirebaseProvider';
 import { Login } from './components/Login';
 import { AdminBootstrap } from './components/AdminBootstrap';
+import { AdminPanel } from './components/AdminPanel';
+import { SellerPanel } from './components/SellerPanel';
 import { auth, db } from './lib/firebase';
 import { signOut } from 'firebase/auth';
 import { 
@@ -182,6 +184,7 @@ export default function App() {
 
   const [error, setError] = React.useState<string | null>(null);
   const [isSyncing, setIsSyncing] = React.useState(true);
+  const [adminViewingBuyerPortal, setAdminViewingBuyerPortal] = React.useState(false);
 
   // Client-side routing for /admin/bootstrap
   const [currentPath, setCurrentPath] = React.useState<string>(() => {
@@ -571,6 +574,27 @@ export default function App() {
     );
   }
 
+  // Papel: ADMIN -> Painel Administrativo
+  if (user.role === 'ADMIN' && !adminViewingBuyerPortal) {
+    return (
+      <AdminPanel 
+        currentUser={user} 
+        onLogout={logout} 
+        onNavigateToBuyerPortal={() => setAdminViewingBuyerPortal(true)} 
+      />
+    );
+  }
+
+  // Papel: SELLER -> Painel do Vendedor
+  if (user.role === 'SELLER') {
+    return (
+      <SellerPanel 
+        currentUser={user} 
+        onLogout={logout} 
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 flex text-slate-900 font-sans">
       {/* Sidebar - Configuração */}
@@ -761,20 +785,37 @@ export default function App() {
             </nav>
           </div>
 
-          <div className="flex items-center gap-4">
-             <button 
+          <div className="flex items-center gap-3 sm:gap-4">
+            {user.role === 'ADMIN' && (
+              <button 
+                type="button"
+                onClick={() => setAdminViewingBuyerPortal(false)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition-colors cursor-pointer"
+                title="Retornar para a Gestão de Usuários"
+              >
+                ← Painel Admin
+              </button>
+            )}
+
+            <button 
               onClick={() => setActiveTab('transactions')}
-              className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-100"
+              className="flex items-center gap-2 bg-indigo-600 text-white px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm cursor-pointer"
             >
-              <Plus size={18} />
-              Novo Lançamento
-             </button>
-             <button 
+              <Plus size={16} />
+              <span className="hidden sm:inline">Novo Lançamento</span>
+            </button>
+
+            <div className="hidden sm:flex flex-col text-right pl-3 border-l border-slate-200">
+              <span className="text-xs font-bold text-slate-800 leading-tight">{user.name}</span>
+              <span className="text-[10px] text-slate-400 font-mono">@{user.login}</span>
+            </div>
+
+            <button 
               onClick={() => logout()}
-              className="p-2 text-slate-400 hover:text-rose-600 transition-colors"
-              title="Sair"
+              className="p-2 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+              title="Sair do Sistema"
             >
-              <LogOut size={20} />
+              <LogOut size={18} />
             </button>
           </div>
         </header>

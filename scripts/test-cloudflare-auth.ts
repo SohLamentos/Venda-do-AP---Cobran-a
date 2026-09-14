@@ -393,8 +393,8 @@ async function runAll34Tests() {
     // Inserir usuário com status DISABLED
     const hashDisabled = await hashPassword('DisabledUser123!');
     d1.exec(`
-      INSERT INTO users (id, email, name, role, status, password_hash)
-      VALUES ('user-disabled-1', 'disabled@example.com', 'Disabled User', 'CLIENT', 'DISABLED', '${hashDisabled}')
+      INSERT INTO users (id, login, email, name, role, status, password_hash)
+      VALUES ('user-disabled-1', 'disabled.user', 'disabled@example.com', 'Disabled User', 'BUYER', 'DISABLED', '${hashDisabled}')
     `);
 
     const req = new Request('http://localhost/api/v1/auth/login', {
@@ -683,8 +683,8 @@ async function runAll34Tests() {
     const clientHash = await hashPassword('ClientPass123!');
     clientUserId = 'client-test-uuid-1';
     d1.exec(`
-      INSERT INTO users (id, email, name, role, status, password_hash)
-      VALUES ('${clientUserId}', 'comprador.teste@email.com', 'Comprador Teste', 'CLIENT', 'ACTIVE', '${clientHash}')
+      INSERT INTO users (id, login, email, name, role, status, password_hash)
+      VALUES ('${clientUserId}', 'comprador.teste', 'comprador.teste@email.com', 'Comprador Teste', 'BUYER', 'ACTIVE', '${clientHash}')
     `);
 
     const reqLogin = new Request('http://localhost/api/v1/auth/login', {
@@ -733,7 +733,7 @@ async function runAll34Tests() {
     record(
       30,
       'POST /api/v1/admin/users cria novo CLIENT com sucesso (201)',
-      res.status === 201 && json.ok === true && json.user?.role === 'CLIENT',
+      res.status === 201 && json.ok === true && (json.user?.role === 'CLIENT' || json.user?.role === 'BUYER'),
       `novo id: ${newCreatedClientId}, role: ${json.user?.role}`
     );
   }

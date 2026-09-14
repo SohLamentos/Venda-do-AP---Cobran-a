@@ -9,8 +9,11 @@
     "preview": "vite preview --port=3000 --host=0.0.0.0",
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "test": "npm run test:auth && npm run test:bootstrap && npm run test:login-roles && npm run test:user-management",
     "test:auth": "tsx scripts/test-cloudflare-auth.ts",
     "test:bootstrap": "tsx scripts/test-admin-bootstrap.ts",
+    "test:login-roles": "tsx scripts/test-login-roles.ts",
+    "test:user-management": "tsx scripts/test-user-management.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },

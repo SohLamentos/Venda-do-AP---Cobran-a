@@ -1,17 +1,18 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { apiService } from '../services/apiService';
-import { CloudflareUser } from '../types';
+import { CloudflareUser, UserRole } from '../types';
 
 export interface AuthContextType {
   user: {
     uid: string;
+    login: string;
     email: string | null;
     name?: string | null;
-    role: 'ADMIN' | 'CLIENT';
+    role: UserRole;
   } | null;
   cloudflareUser: CloudflareUser | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  login: (login: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -52,9 +53,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     refreshUser();
   }, [refreshUser]);
 
-  const login = async (email: string, password: string): Promise<{ ok: boolean; error?: string }> => {
+  const login = async (loginParam: string, password: string): Promise<{ ok: boolean; error?: string }> => {
     try {
-      const res = await apiService.login(email, password);
+      const res = await apiService.login(loginParam, password);
       if (res.ok && res.user) {
         setCloudflareUser(res.user);
         return { ok: true };
@@ -76,7 +77,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const user = cloudflareUser
     ? {
         uid: cloudflareUser.id,
-        email: cloudflareUser.email,
+        login: cloudflareUser.login,
+        email: cloudflareUser.email || null,
         name: cloudflareUser.name,
         role: cloudflareUser.role,
       }

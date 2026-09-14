@@ -45,18 +45,20 @@ export class AuthError extends Error {
 
 export interface SessionUser {
   id: string;
-  email: string;
+  login: string;
+  email: string | null;
   name: string | null;
-  role: 'ADMIN' | 'CLIENT';
+  role: 'ADMIN' | 'SELLER' | 'BUYER';
   sessionId?: string;
   tokenHash?: string;
 }
 
 export interface DbUser {
   id: string;
-  email: string;
-  name: string | null;
-  role: 'ADMIN' | 'CLIENT';
+  login: string;
+  email: string | null;
+  name: string;
+  role: 'ADMIN' | 'SELLER' | 'BUYER';
   status: 'ACTIVE' | 'DISABLED';
   password_hash: string;
   created_at: string;
@@ -70,8 +72,28 @@ const PBKDF2_ITERATIONS = 310000;
 const DUMMY_HASH = 'pbkdf2_sha256$310000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5n';
 
 // ============================================================================
-// HELPERS CRIPTOGRÁFICOS (PBKDF2, SHA-256, TOKENS)
+// HELPERS CRIPTOGRÁFICOS (PBKDF2, SHA-256, TOKENS, VALIDAÇÃO)
 // ============================================================================
+
+export function validateLoginFormat(login: string): { valid: boolean; error?: string } {
+  if (!login || typeof login !== 'string') {
+    return { valid: false, error: 'Login é obrigatório.' };
+  }
+  const trimmed = login.trim().toLowerCase();
+  if (trimmed.length < 3) {
+    return { valid: false, error: 'O login deve ter no mínimo 3 caracteres.' };
+  }
+  if (trimmed.length > 50) {
+    return { valid: false, error: 'O login não pode exceder 50 caracteres.' };
+  }
+  if (/\s/.test(login)) {
+    return { valid: false, error: 'O login não pode conter espaços.' };
+  }
+  if (!/^[a-z0-9._-]+$/.test(trimmed)) {
+    return { valid: false, error: 'O login só pode conter letras minúsculas, números, ponto, traço e underscore.' };
+  }
+  return { valid: true };
+}
 
 export function base64Encode(bytes: Uint8Array): string {
   let binary = '';
@@ -353,18 +375,18 @@ export async function logAuditEvent(
 
 export async function checkRateLimit(
   db: D1Database,
-  email: string,
+  login: string,
   ip: string
 ): Promise<{ allowed: boolean; count: number }> {
   try {
     const result = await db
       .prepare(`
         SELECT COUNT(*) as failed_count FROM auth_login_attempts
-        WHERE (email = ? OR ip_address = ?)
+        WHERE (login = ? OR ip_address = ?)
           AND success = 0
           AND attempted_at > datetime('now', '-15 minutes')
       `)
-      .bind(email, ip)
+      .bind(login, ip)
       .first<{ failed_count: number }>();
 
     const count = Number(result?.failed_count ?? 0);
@@ -376,19 +398,29 @@ export async function checkRateLimit(
 
 export async function recordLoginAttempt(
   db: D1Database,
-  email: string,
+  login: string,
   ip: string,
   success: boolean
 ): Promise<void> {
   try {
     const id = crypto.randomUUID();
-    await db
-      .prepare(`
-        INSERT INTO auth_login_attempts (id, email, ip_address, attempted_at, success)
-        VALUES (?, ?, ?, datetime('now'), ?)
-      `)
-      .bind(id, email, ip, success ? 1 : 0)
-      .run();
+    try {
+      await db
+        .prepare(`
+          INSERT INTO auth_login_attempts (id, login, email, ip_address, attempted_at, success)
+          VALUES (?, ?, ?, ?, datetime('now'), ?)
+        `)
+        .bind(id, login, login, ip, success ? 1 : 0)
+        .run();
+    } catch (_err) {
+      await db
+        .prepare(`
+          INSERT INTO auth_login_attempts (id, login, ip_address, attempted_at, success)
+          VALUES (?, ?, ?, datetime('now'), ?)
+        `)
+        .bind(id, login, ip, success ? 1 : 0)
+        .run();
+    }
 
     // Limpeza de tentativas com mais de 24h
     await db.prepare("DELETE FROM auth_login_attempts WHERE attempted_at < datetime('now', '-1 day')").run();
@@ -422,6 +454,7 @@ export async function requireSessionUser(request: Request, env: Env): Promise<Se
         s.revoked_at,
         s.token_hash,
         u.id as user_id,
+        u.login,
         u.email,
         u.name,
         u.role,
@@ -437,9 +470,10 @@ export async function requireSessionUser(request: Request, env: Env): Promise<Se
       revoked_at: string | null;
       token_hash: string;
       user_id: string;
-      email: string;
+      login: string;
+      email: string | null;
       name: string | null;
-      role: 'ADMIN' | 'CLIENT';
+      role: 'ADMIN' | 'SELLER' | 'BUYER';
       status: 'ACTIVE' | 'DISABLED';
     }>();
 
@@ -468,6 +502,7 @@ export async function requireSessionUser(request: Request, env: Env): Promise<Se
 
   return {
     id: sessionRow.user_id,
+    login: sessionRow.login,
     email: sessionRow.email,
     name: sessionRow.name,
     role: sessionRow.role,
@@ -476,7 +511,7 @@ export async function requireSessionUser(request: Request, env: Env): Promise<Se
   };
 }
 
-export function requireRole(user: SessionUser, allowedRoles: ('ADMIN' | 'CLIENT')[]): void {
+export function requireRole(user: SessionUser, allowedRoles: ('ADMIN' | 'SELLER' | 'BUYER')[]): void {
   if (!allowedRoles.includes(user.role)) {
     throw new AuthError('FORBIDDEN', 'Acesso negado para o seu perfil.', 403);
   }
@@ -519,6 +554,8 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ ok: false, error: 'Database not available' }, 503, request, env);
   }
 
+  await ensureDatabaseSchema(env.DB);
+
   const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || '127.0.0.1';
 
   let body: any;
@@ -528,17 +565,17 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ ok: false, code: 'INVALID_REQUEST', message: 'JSON inválido' }, 400, request, env);
   }
 
-  const emailRaw = body?.email;
+  const loginRaw = body?.login ?? body?.username ?? body?.email;
   const password = body?.password;
 
-  if (!emailRaw || typeof emailRaw !== 'string' || !password || typeof password !== 'string') {
+  if (!loginRaw || typeof loginRaw !== 'string' || !password || typeof password !== 'string') {
     return jsonResponse({ ok: false, code: 'INVALID_CREDENTIALS' }, 401, request, env);
   }
 
-  const email = emailRaw.trim().toLowerCase();
+  const login = loginRaw.trim().toLowerCase();
 
   // 1. Verificação de rate limiting / brute force
-  const rateLimit = await checkRateLimit(env.DB, email, clientIp);
+  const rateLimit = await checkRateLimit(env.DB, login, clientIp);
   if (!rateLimit.allowed) {
     return jsonResponse(
       {
@@ -552,30 +589,36 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     );
   }
 
-  // 2. Busca do usuário
+  // 2. Busca do usuário por login ou email
   const user = await env.DB
-    .prepare('SELECT id, email, name, role, status, password_hash FROM users WHERE email = ?')
-    .bind(email)
+    .prepare('SELECT id, login, email, name, role, status, password_hash FROM users WHERE login = ? OR email = ?')
+    .bind(login, login)
     .first<DbUser>();
 
-  // 3. Timing attack protection: se usuário não existe ou está desativado, roda verificação dummy
-  if (!user || user.status !== 'ACTIVE') {
-    await verifyPassword(password, DUMMY_HASH);
-    await recordLoginAttempt(env.DB, email, clientIp, false);
-    await logAuditEvent(env.DB, null, 'LOGIN_FAILED', `Falha de login (usuário inexistente ou inativo): ${email}`, clientIp);
+  // 3. Timing attack protection & anti-enumeração:
+  // Se usuário não existe ou está desativado (DISABLED), executa PBKDF2 equiparável e retorna sempre 401 INVALID_CREDENTIALS
+  if (!user || user.status === 'DISABLED') {
+    const hashToVerify = user?.password_hash || DUMMY_HASH;
+    await verifyPassword(password, hashToVerify);
+    await recordLoginAttempt(env.DB, login, clientIp, false);
+    if (user && user.status === 'DISABLED') {
+      await logAuditEvent(env.DB, user.id, 'LOGIN_FAILED', `Tentativa de login em conta desativada: ${login}`, clientIp);
+    } else {
+      await logAuditEvent(env.DB, null, 'LOGIN_FAILED', `Falha de login (usuário inexistente): ${login}`, clientIp);
+    }
     return jsonResponse({ ok: false, code: 'INVALID_CREDENTIALS' }, 401, request, env);
   }
 
   // 4. Verificação da senha real
   const passwordValid = await verifyPassword(password, user.password_hash);
   if (!passwordValid) {
-    await recordLoginAttempt(env.DB, email, clientIp, false);
-    await logAuditEvent(env.DB, user.id, 'LOGIN_FAILED', `Senha incorreta para usuário ${email}`, clientIp);
+    await recordLoginAttempt(env.DB, login, clientIp, false);
+    await logAuditEvent(env.DB, user.id, 'LOGIN_FAILED', `Senha incorreta para usuário ${login}`, clientIp);
     return jsonResponse({ ok: false, code: 'INVALID_CREDENTIALS' }, 401, request, env);
   }
 
   // 5. Sucesso: registra tentativa bem-sucedida e cria nova sessão
-  await recordLoginAttempt(env.DB, email, clientIp, true);
+  await recordLoginAttempt(env.DB, login, clientIp, true);
 
   const rawToken = generateRandomToken(32);
   const tokenHash = await sha256Hex(rawToken);
@@ -596,7 +639,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     .bind(user.id)
     .run();
 
-  await logAuditEvent(env.DB, user.id, 'LOGIN_SUCCESS', `Login efetuado com sucesso para ${email}`, clientIp);
+  await logAuditEvent(env.DB, user.id, 'LOGIN_SUCCESS', `Login efetuado com sucesso para ${login}`, clientIp);
 
   const cookieHeader = buildSessionCookie(rawToken, request);
 
@@ -605,9 +648,11 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
       ok: true,
       user: {
         id: user.id,
-        email: user.email,
+        login: user.login,
         name: user.name,
+        email: user.email,
         role: user.role,
+        status: user.status,
       },
     },
     200,
@@ -665,8 +710,9 @@ async function handleAuthMe(request: Request, env: Env): Promise<Response> {
         ok: true,
         user: {
           id: user.id,
-          email: user.email,
+          login: user.login,
           name: user.name,
+          email: user.email,
           role: user.role,
         },
       },
@@ -747,92 +793,214 @@ async function handleChangePassword(request: Request, env: Env): Promise<Respons
 }
 
 /**
+ * Assegura que o esquema do D1 esteja compatível com login e papéis (ADMIN, SELLER, BUYER)
+ */
+let schemaChecked = false;
+async function ensureDatabaseSchema(db: D1Database): Promise<void> {
+  if (schemaChecked) return;
+  try {
+    const tableInfo = await db.prepare("PRAGMA table_info(users)").all();
+    const columns = (tableInfo.results || []).map((r: any) => r.name);
+    if (columns.length > 0 && !columns.includes('login')) {
+      console.log('[AutoMigration] Migrando tabela users para login e novos papéis...');
+      const migrationStmts = [
+        db.prepare(`
+          CREATE TABLE IF NOT EXISTS users_new (
+            id TEXT PRIMARY KEY,
+            login TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE,
+            role TEXT NOT NULL CHECK (role IN ('ADMIN', 'SELLER', 'BUYER')),
+            status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISABLED')),
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_login_at TEXT
+          );
+        `),
+        db.prepare(`
+          INSERT OR IGNORE INTO users_new (id, login, name, email, role, status, password_hash, created_at, updated_at, last_login_at)
+          SELECT 
+            id,
+            LOWER(SUBSTR(email, 1, CASE WHEN INSTR(email, '@') > 0 THEN INSTR(email, '@') - 1 ELSE LENGTH(email) END)),
+            COALESCE(name, 'Administrador'),
+            email,
+            CASE WHEN UPPER(role) = 'ADMIN' THEN 'ADMIN' ELSE 'BUYER' END,
+            COALESCE(status, 'ACTIVE'),
+            password_hash,
+            created_at,
+            updated_at,
+            last_login_at
+          FROM users;
+        `),
+        db.prepare("DROP TABLE users;"),
+        db.prepare("ALTER TABLE users_new RENAME TO users;"),
+        db.prepare("CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);"),
+        db.prepare("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);")
+      ];
+
+      if (typeof (db as any).batch === 'function') {
+        await (db as any).batch(migrationStmts);
+      } else {
+        for (const s of migrationStmts) {
+          await s.run();
+        }
+      }
+      console.log('[AutoMigration] Migração da tabela users concluída com sucesso.');
+    }
+
+    // Checagem auth_login_attempts
+    const attemptsInfo = await db.prepare("PRAGMA table_info(auth_login_attempts)").all();
+    const attemptCols = (attemptsInfo.results || []).map((r: any) => r.name);
+    if (attemptCols.length > 0 && !attemptCols.includes('login')) {
+      try {
+        await db.prepare("ALTER TABLE auth_login_attempts ADD COLUMN login TEXT").run();
+        await db.prepare("CREATE INDEX IF NOT EXISTS idx_auth_attempts_login ON auth_login_attempts(login, attempted_at)").run();
+      } catch (_e) {}
+    }
+    schemaChecked = true;
+  } catch (err) {
+    console.warn('[AutoMigration] Schema check aviso:', err);
+  }
+}
+
+/**
  * POST /api/v1/admin/bootstrap
  */
 async function handleAdminBootstrap(request: Request, env: Env): Promise<Response> {
-  if (!env.DB) {
-    return jsonResponse({ ok: false, error: 'Database not available' }, 503, request, env);
-  }
+  try {
+    if (!env.DB) {
+      return jsonResponse({ ok: false, error: 'Database not available' }, 503, request, env);
+    }
 
-  // 1. Validação estrita do token de bootstrap configurado em Cloudflare secrets
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return jsonResponse({ ok: false, code: 'UNAUTHORIZED', message: 'Token de bootstrap ausente.' }, 401, request, env);
-  }
+    await ensureDatabaseSchema(env.DB);
 
-  const token = authHeader.substring(7).trim();
-  const expectedToken = env.ADMIN_BOOTSTRAP_TOKEN;
-  if (!expectedToken || token !== expectedToken) {
-    return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Token de bootstrap inválido ou não configurado.' }, 403, request, env);
-  }
+    // 1. Validação estrita do token de bootstrap configurado em Cloudflare secrets
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return jsonResponse({ ok: false, code: 'UNAUTHORIZED', message: 'Token de bootstrap ausente.' }, 401, request, env);
+    }
 
-  // 2. Verificar se já existe algum ADMIN ativo
-  const adminCheck = await env.DB
-    .prepare("SELECT COUNT(*) as admin_count FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'")
-    .first<{ admin_count: number }>();
+    const token = authHeader.substring(7).trim();
+    const expectedToken = env.ADMIN_BOOTSTRAP_TOKEN ? env.ADMIN_BOOTSTRAP_TOKEN.trim() : '';
+    if (!expectedToken || token !== expectedToken) {
+      return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Token de bootstrap inválido ou não configurado.' }, 403, request, env);
+    }
 
-  if (adminCheck && Number(adminCheck.admin_count) > 0) {
+    // 2. Verificar se já existe algum ADMIN ativo
+    const adminCheck = await env.DB
+      .prepare("SELECT COUNT(*) as admin_count FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'")
+      .first<{ admin_count: number }>();
+
+    if (adminCheck && Number(adminCheck.admin_count) > 0) {
+      return jsonResponse(
+        {
+          ok: false,
+          code: 'ADMIN_ALREADY_EXISTS',
+          message: 'Primeiro administrador já existe no sistema.',
+        },
+        409,
+        request,
+        env
+      );
+    }
+
+    // 3. Validação do payload
+    let body: any;
+    try {
+      body = await request.json();
+    } catch (_e) {
+      return jsonResponse({ ok: false, code: 'INVALID_REQUEST', message: 'JSON inválido' }, 400, request, env);
+    }
+
+    const { login, username, name, email, password } = body || {};
+    const candidateLogin =
+      login ??
+      username ??
+      (email && typeof email === 'string' && email.includes('@')
+        ? email.split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '')
+        : '');
+
+    const loginValidation = validateLoginFormat(candidateLogin);
+    if (!loginValidation.valid) {
+      return jsonResponse({ ok: false, code: 'INVALID_LOGIN', message: loginValidation.error }, 400, request, env);
+    }
+
+    const policy = validatePasswordPolicy(password);
+    if (!policy.valid) {
+      return jsonResponse({ ok: false, code: 'INVALID_PASSWORD', message: policy.error }, 400, request, env);
+    }
+
+    const normalizedLogin = candidateLogin.trim().toLowerCase();
+    const normalizedEmail = email && typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
+
+    if (normalizedEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(normalizedEmail)) {
+        return jsonResponse({ ok: false, code: 'INVALID_EMAIL', message: 'E-mail inválido.' }, 400, request, env);
+      }
+      const existingEmail = await env.DB
+        .prepare('SELECT id FROM users WHERE email = ?')
+        .bind(normalizedEmail)
+        .first<{ id: string }>();
+
+      if (existingEmail) {
+        return jsonResponse({ ok: false, code: 'EMAIL_ALREADY_EXISTS', message: 'E-mail já cadastrado.' }, 409, request, env);
+      }
+    }
+
+    // Checagem de login duplicado
+    const existingLogin = await env.DB
+      .prepare('SELECT id FROM users WHERE login = ?')
+      .bind(normalizedLogin)
+      .first<{ id: string }>();
+
+    if (existingLogin) {
+      return jsonResponse({ ok: false, code: 'LOGIN_ALREADY_EXISTS', message: 'Login já cadastrado.' }, 409, request, env);
+    }
+
+    const userId = crypto.randomUUID();
+    const passwordHash = await hashPassword(password);
+    const adminName = name && typeof name === 'string' && name.trim() ? name.trim() : 'Administrador';
+
+    // 4. Criação do primeiro ADMIN
+    await env.DB
+      .prepare(`
+        INSERT INTO users (id, login, name, email, role, status, password_hash, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'ADMIN', 'ACTIVE', ?, datetime('now'), datetime('now'))
+      `)
+      .bind(userId, normalizedLogin, adminName, normalizedEmail, passwordHash)
+      .run();
+
+    const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+    await logAuditEvent(env.DB, userId, 'USER_CREATED', `Primeiro ADMIN criado via bootstrap: ${normalizedLogin}`, clientIp);
+
     return jsonResponse(
       {
-        ok: false,
-        code: 'ADMIN_ALREADY_EXISTS',
-        message: 'Primeiro administrador já existe no sistema.',
+        ok: true,
+        message: 'Primeiro administrador criado com sucesso.',
+        user: {
+          id: userId,
+          login: normalizedLogin,
+          name: adminName,
+          email: normalizedEmail,
+          role: 'ADMIN',
+          status: 'ACTIVE',
+        },
       },
-      409,
+      201,
+      request,
+      env
+    );
+  } catch (err: any) {
+    console.error('[AdminBootstrap] Erro:', err);
+    return jsonResponse(
+      { ok: false, code: 'INTERNAL_ERROR', message: 'Erro ao processar criação do administrador.' },
+      500,
       request,
       env
     );
   }
-
-  // 3. Validação do payload
-  let body: any;
-  try {
-    body = await request.json();
-  } catch (_e) {
-    return jsonResponse({ ok: false, code: 'INVALID_REQUEST', message: 'JSON inválido' }, 400, request, env);
-  }
-
-  const { email, name, password } = body || {};
-  if (!email || typeof email !== 'string' || !email.includes('@')) {
-    return jsonResponse({ ok: false, code: 'INVALID_EMAIL', message: 'E-mail inválido.' }, 400, request, env);
-  }
-
-  const policy = validatePasswordPolicy(password);
-  if (!policy.valid) {
-    return jsonResponse({ ok: false, code: 'INVALID_PASSWORD', message: policy.error }, 400, request, env);
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-  const passwordHash = await hashPassword(password);
-  const userId = crypto.randomUUID();
-
-  // 4. Criação do primeiro ADMIN
-  await env.DB
-    .prepare(`
-      INSERT INTO users (id, email, name, role, status, password_hash, created_at, updated_at)
-      VALUES (?, ?, ?, 'ADMIN', 'ACTIVE', ?, datetime('now'), datetime('now'))
-    `)
-    .bind(userId, normalizedEmail, name?.trim() || null, passwordHash)
-    .run();
-
-  const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
-  await logAuditEvent(env.DB, userId, 'USER_CREATED', `Primeiro ADMIN criado via bootstrap: ${normalizedEmail}`, clientIp);
-
-  return jsonResponse(
-    {
-      ok: true,
-      message: 'Primeiro administrador criado com sucesso.',
-      user: {
-        id: userId,
-        email: normalizedEmail,
-        name: name?.trim() || null,
-        role: 'ADMIN',
-      },
-    },
-    201,
-    request,
-    env
-  );
 }
 
 /**
@@ -849,7 +1017,7 @@ async function handleAdminUsersGet(request: Request, env: Env): Promise<Response
 
     const { results } = await env.DB
       .prepare(`
-        SELECT id, email, name, role, status, created_at, updated_at, last_login_at
+        SELECT id, login, name, email, role, status, created_at, updated_at, last_login_at
         FROM users
         ORDER BY created_at DESC
       `)
@@ -865,7 +1033,7 @@ async function handleAdminUsersGet(request: Request, env: Env): Promise<Response
 }
 
 /**
- * POST /api/v1/admin/users (Criação de CLIENT)
+ * POST /api/v1/admin/users (Criação de Usuário com Role)
  */
 async function handleAdminUsersPost(request: Request, env: Env): Promise<Response> {
   try {
@@ -877,20 +1045,32 @@ async function handleAdminUsersPost(request: Request, env: Env): Promise<Respons
     }
 
     const body = (await request.json()) as any;
-    const { email, name, password, role } = body || {};
+    const { login, name, email, password, role } = body || {};
 
-    // Nesta etapa: permitir somente role CLIENT por esta rota
-    if (role && role !== 'CLIENT') {
+    const rawRole = role ? String(role).toUpperCase() : 'BUYER';
+    const targetRole = rawRole === 'CLIENT' ? 'BUYER' : rawRole;
+    if (!['ADMIN', 'SELLER', 'BUYER'].includes(targetRole)) {
       return jsonResponse(
-        { ok: false, code: 'BAD_REQUEST', message: 'Nesta etapa, somente usuários com perfil CLIENT podem ser criados.' },
+        { ok: false, code: 'BAD_REQUEST', message: 'Perfil inválido. Deve ser ADMIN, SELLER ou BUYER.' },
         400,
         request,
         env
       );
     }
 
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-      return jsonResponse({ ok: false, code: 'INVALID_EMAIL', message: 'E-mail inválido.' }, 400, request, env);
+    const candidateLogin =
+      login ??
+      (email && typeof email === 'string' && email.includes('@')
+        ? email.split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '')
+        : '');
+
+    const loginValidation = validateLoginFormat(candidateLogin);
+    if (!loginValidation.valid) {
+      return jsonResponse({ ok: false, code: 'INVALID_LOGIN', message: loginValidation.error }, 400, request, env);
+    }
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return jsonResponse({ ok: false, code: 'INVALID_NAME', message: 'Nome é obrigatório.' }, 400, request, env);
     }
 
     const policy = validatePasswordPolicy(password);
@@ -898,17 +1078,33 @@ async function handleAdminUsersPost(request: Request, env: Env): Promise<Respons
       return jsonResponse({ ok: false, code: 'INVALID_PASSWORD', message: policy.error }, 400, request, env);
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedLogin = candidateLogin.trim().toLowerCase();
+    const normalizedEmail = email && typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
 
-    // Checagem de e-mail duplicado
-    const existing = await env.DB
-      .prepare('SELECT id FROM users WHERE email = ?')
-      .bind(normalizedEmail)
+    if (normalizedEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(normalizedEmail)) {
+        return jsonResponse({ ok: false, code: 'INVALID_EMAIL', message: 'E-mail inválido.' }, 400, request, env);
+      }
+      const existingEmail = await env.DB
+        .prepare('SELECT id FROM users WHERE email = ?')
+        .bind(normalizedEmail)
+        .first<{ id: string }>();
+
+      if (existingEmail) {
+        return jsonResponse({ ok: false, code: 'EMAIL_ALREADY_EXISTS', message: 'E-mail já cadastrado.' }, 409, request, env);
+      }
+    }
+
+    // Checagem de login duplicado
+    const existingLogin = await env.DB
+      .prepare('SELECT id FROM users WHERE login = ?')
+      .bind(normalizedLogin)
       .first<{ id: string }>();
 
-    if (existing) {
+    if (existingLogin) {
       return jsonResponse(
-        { ok: false, code: 'EMAIL_ALREADY_EXISTS', message: 'E-mail já cadastrado no sistema.' },
+        { ok: false, code: 'LOGIN_ALREADY_EXISTS', message: 'Login já cadastrado no sistema.' },
         409,
         request,
         env
@@ -920,27 +1116,120 @@ async function handleAdminUsersPost(request: Request, env: Env): Promise<Respons
 
     await env.DB
       .prepare(`
-        INSERT INTO users (id, email, name, role, status, password_hash, created_at, updated_at)
-        VALUES (?, ?, ?, 'CLIENT', 'ACTIVE', ?, datetime('now'), datetime('now'))
+        INSERT INTO users (id, login, name, email, role, status, password_hash, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, datetime('now'), datetime('now'))
       `)
-      .bind(userId, normalizedEmail, name?.trim() || null, passwordHash)
+      .bind(userId, normalizedLogin, name.trim(), normalizedEmail, targetRole, passwordHash)
       .run();
 
     const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
-    await logAuditEvent(env.DB, userId, 'USER_CREATED', `Usuário CLIENT criado pelo admin ${user.email}`, clientIp);
+    await logAuditEvent(env.DB, userId, 'USER_CREATED', `Usuário ${targetRole} (${normalizedLogin}) criado pelo admin ${user.login}`, clientIp);
 
     return jsonResponse(
       {
         ok: true,
         user: {
           id: userId,
+          login: normalizedLogin,
+          name: name.trim(),
           email: normalizedEmail,
-          name: name?.trim() || null,
-          role: 'CLIENT',
+          role: targetRole,
           status: 'ACTIVE',
         },
       },
       201,
+      request,
+      env
+    );
+  } catch (err: any) {
+    if (err instanceof AuthError) {
+      return jsonResponse({ ok: false, code: err.code, message: err.message }, err.status, request, env);
+    }
+    return jsonResponse({ ok: false, code: 'INTERNAL_ERROR', message: err?.message || 'Erro interno' }, 500, request, env);
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/users/:id/role
+ */
+async function handleAdminUserRolePatch(request: Request, env: Env, targetUserId: string): Promise<Response> {
+  try {
+    const user = await requireSessionUser(request, env);
+    requireRole(user, ['ADMIN']);
+
+    if (!env.DB) {
+      return jsonResponse({ ok: false, error: 'Database not available' }, 503, request, env);
+    }
+
+    const body = (await request.json()) as any;
+    const { role } = body || {};
+
+    const targetRole = role ? String(role).toUpperCase() : '';
+    if (!['ADMIN', 'SELLER', 'BUYER'].includes(targetRole)) {
+      return jsonResponse(
+        { ok: false, code: 'BAD_REQUEST', message: 'Perfil inválido. Deve ser ADMIN, SELLER ou BUYER.' },
+        400,
+        request,
+        env
+      );
+    }
+
+    const existing = await env.DB
+      .prepare('SELECT id, login, role, status FROM users WHERE id = ?')
+      .bind(targetUserId)
+      .first<{ id: string; login: string; role: string; status: string }>();
+
+    if (!existing) {
+      return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Usuário não encontrado.' }, 404, request, env);
+    }
+
+    // Proteção do Último ADMIN
+    if (existing.role === 'ADMIN' && targetRole !== 'ADMIN') {
+      const adminCountRow = await env.DB
+        .prepare("SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' AND id != ?")
+        .bind(targetUserId)
+        .first<{ count: number }>();
+
+      const activeAdminsRemaining = Number(adminCountRow?.count ?? 0);
+      if (activeAdminsRemaining < 1) {
+        return jsonResponse(
+          {
+            ok: false,
+            code: 'LAST_ADMIN_PROTECTION',
+            message: 'Não é permitido alterar o perfil do único administrador ativo do sistema.',
+          },
+          409,
+          request,
+          env
+        );
+      }
+    }
+
+    await env.DB
+      .prepare("UPDATE users SET role = ?, updated_at = datetime('now') WHERE id = ?")
+      .bind(targetRole, targetUserId)
+      .run();
+
+    const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+    await logAuditEvent(
+      env.DB,
+      targetUserId,
+      'USER_ROLE_CHANGED',
+      `Perfil do usuário ${existing.login} alterado de ${existing.role} para ${targetRole} pelo admin ${user.login}`,
+      clientIp
+    );
+
+    return jsonResponse(
+      {
+        ok: true,
+        message: 'Perfil atualizado com sucesso.',
+        user: {
+          id: targetUserId,
+          login: existing.login,
+          role: targetRole,
+        },
+      },
+      200,
       request,
       env
     );
@@ -972,12 +1261,34 @@ async function handleAdminUserStatusPatch(request: Request, env: Env, targetUser
     }
 
     const existing = await env.DB
-      .prepare('SELECT id, email, status FROM users WHERE id = ?')
+      .prepare('SELECT id, login, role, status FROM users WHERE id = ?')
       .bind(targetUserId)
-      .first<{ id: string; email: string; status: string }>();
+      .first<{ id: string; login: string; role: string; status: string }>();
 
     if (!existing) {
       return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Usuário não encontrado.' }, 404, request, env);
+    }
+
+    // Proteção do Último ADMIN
+    if (existing.role === 'ADMIN' && status === 'DISABLED') {
+      const adminCountRow = await env.DB
+        .prepare("SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' AND id != ?")
+        .bind(targetUserId)
+        .first<{ count: number }>();
+
+      const activeAdminsRemaining = Number(adminCountRow?.count ?? 0);
+      if (activeAdminsRemaining < 1) {
+        return jsonResponse(
+          {
+            ok: false,
+            code: 'LAST_ADMIN_PROTECTION',
+            message: 'Não é permitido desativar o único administrador ativo do sistema.',
+          },
+          409,
+          request,
+          env
+        );
+      }
     }
 
     await env.DB
@@ -998,11 +1309,116 @@ async function handleAdminUserStatusPatch(request: Request, env: Env, targetUser
       env.DB,
       targetUserId,
       status === 'DISABLED' ? 'USER_DISABLED' : 'USER_ENABLED',
-      `Status do usuário ${existing.email} alterado para ${status} pelo admin ${user.email}`,
+      `Status do usuário ${existing.login} alterado para ${status} pelo admin ${user.login}`,
       clientIp
     );
 
     return jsonResponse({ ok: true, message: 'Status atualizado com sucesso.' }, 200, request, env);
+  } catch (err: any) {
+    if (err instanceof AuthError) {
+      return jsonResponse({ ok: false, code: err.code, message: err.message }, err.status, request, env);
+    }
+    return jsonResponse({ ok: false, code: 'INTERNAL_ERROR', message: err?.message || 'Erro interno' }, 500, request, env);
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/users/:id (Edição de dados do usuário)
+ */
+async function handleAdminUserEditPatch(request: Request, env: Env, targetUserId: string): Promise<Response> {
+  try {
+    const user = await requireSessionUser(request, env);
+    requireRole(user, ['ADMIN']);
+
+    if (!env.DB) {
+      return jsonResponse({ ok: false, error: 'Database not available' }, 503, request, env);
+    }
+
+    const body = (await request.json()) as any;
+    const { name, login, email } = body || {};
+
+    const existing = await env.DB
+      .prepare('SELECT id, login, name, email FROM users WHERE id = ?')
+      .bind(targetUserId)
+      .first<{ id: string; login: string; name: string; email: string | null }>();
+
+    if (!existing) {
+      return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Usuário não encontrado.' }, 404, request, env);
+    }
+
+    let updatedLogin = existing.login;
+    if (login !== undefined && login !== null) {
+      const loginValidation = validateLoginFormat(login);
+      if (!loginValidation.valid) {
+        return jsonResponse({ ok: false, code: 'INVALID_LOGIN', message: loginValidation.error }, 400, request, env);
+      }
+      const normalizedLogin = login.trim().toLowerCase();
+      if (normalizedLogin !== existing.login) {
+        const duplicateLogin = await env.DB
+          .prepare('SELECT id FROM users WHERE login = ? AND id != ?')
+          .bind(normalizedLogin, targetUserId)
+          .first<{ id: string }>();
+
+        if (duplicateLogin) {
+          return jsonResponse({ ok: false, code: 'LOGIN_ALREADY_EXISTS', message: 'Login já cadastrado.' }, 409, request, env);
+        }
+        updatedLogin = normalizedLogin;
+      }
+    }
+
+    let updatedEmail = existing.email;
+    if (email !== undefined) {
+      const trimmed = email && typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
+      if (trimmed) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(trimmed)) {
+          return jsonResponse({ ok: false, code: 'INVALID_EMAIL', message: 'E-mail inválido.' }, 400, request, env);
+        }
+        const duplicateEmail = await env.DB
+          .prepare('SELECT id FROM users WHERE email = ? AND id != ?')
+          .bind(trimmed, targetUserId)
+          .first<{ id: string }>();
+
+        if (duplicateEmail) {
+          return jsonResponse({ ok: false, code: 'EMAIL_ALREADY_EXISTS', message: 'E-mail já cadastrado.' }, 409, request, env);
+        }
+        updatedEmail = trimmed;
+      } else {
+        updatedEmail = null;
+      }
+    }
+
+    const updatedName = name && typeof name === 'string' && name.trim() ? name.trim() : existing.name;
+
+    await env.DB
+      .prepare("UPDATE users SET name = ?, login = ?, email = ?, updated_at = datetime('now') WHERE id = ?")
+      .bind(updatedName, updatedLogin, updatedEmail, targetUserId)
+      .run();
+
+    const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+    await logAuditEvent(
+      env.DB,
+      targetUserId,
+      'USER_UPDATED',
+      `Dados do usuário ${existing.login} atualizados pelo admin ${user.login}`,
+      clientIp
+    );
+
+    return jsonResponse(
+      {
+        ok: true,
+        message: 'Dados atualizados com sucesso.',
+        user: {
+          id: targetUserId,
+          login: updatedLogin,
+          name: updatedName,
+          email: updatedEmail,
+        },
+      },
+      200,
+      request,
+      env
+    );
   } catch (err: any) {
     if (err instanceof AuthError) {
       return jsonResponse({ ok: false, code: err.code, message: err.message }, err.status, request, env);
@@ -1024,7 +1440,7 @@ async function handleAdminUserResetPasswordPost(request: Request, env: Env, targ
     }
 
     const body = (await request.json()) as any;
-    const { newPassword } = body || {};
+    const newPassword = body?.newPassword ?? body?.new_password;
 
     const policy = validatePasswordPolicy(newPassword);
     if (!policy.valid) {
@@ -1032,9 +1448,9 @@ async function handleAdminUserResetPasswordPost(request: Request, env: Env, targ
     }
 
     const existing = await env.DB
-      .prepare('SELECT id, email FROM users WHERE id = ?')
+      .prepare('SELECT id, login FROM users WHERE id = ?')
       .bind(targetUserId)
-      .first<{ id: string; email: string }>();
+      .first<{ id: string; login: string }>();
 
     if (!existing) {
       return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Usuário não encontrado.' }, 404, request, env);
@@ -1058,7 +1474,7 @@ async function handleAdminUserResetPasswordPost(request: Request, env: Env, targ
       env.DB,
       targetUserId,
       'ADMIN_PASSWORD_RESET',
-      `Senha redefinida pelo admin ${user.email}`,
+      `Senha redefinida pelo admin ${user.login}`,
       clientIp
     );
 
@@ -1173,92 +1589,111 @@ async function handleTransactions(request: Request, env: Env, _url: URL): Promis
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
-    const cors = handleCors(request, env);
-    if (cors) return cors;
+    try {
+      const cors = handleCors(request, env);
+      if (cors) return cors;
 
-    // Proteção CSRF para requisições com mutação de estado
-    if (!validateCsrf(request)) {
-      return jsonResponse({ ok: false, code: 'CSRF_FORBIDDEN', message: 'Origem não autorizada.' }, 403, request, env);
-    }
-
-    const url = new URL(request.url);
-    const { pathname } = url;
-
-    // 1. Health checks
-    if (pathname === '/api/v1/health' && request.method === 'GET') {
-      return jsonResponse({
-        ok: true,
-        service: 'venda-apartamentos',
-        runtime: 'cloudflare-workers',
-      }, 200, request, env);
-    }
-
-    if (pathname === '/api/v1/db/health' && request.method === 'GET') {
-      return handleDbHealth(request, env);
-    }
-
-    // 2. Auth endpoints
-    if (pathname === '/api/v1/auth/login' && request.method === 'POST') {
-      return handleLogin(request, env);
-    }
-
-    if (pathname === '/api/v1/auth/logout' && request.method === 'POST') {
-      return handleLogout(request, env);
-    }
-
-    if (pathname === '/api/v1/auth/me' && request.method === 'GET') {
-      return handleAuthMe(request, env);
-    }
-
-    if (pathname === '/api/v1/auth/change-password' && request.method === 'POST') {
-      return handleChangePassword(request, env);
-    }
-
-    // 3. Admin Bootstrap (Temporário para criação do 1º ADMIN)
-    if (pathname === '/api/v1/admin/bootstrap' && request.method === 'POST') {
-      return handleAdminBootstrap(request, env);
-    }
-
-    // 4. Admin Users Management
-    if (pathname === '/api/v1/admin/users') {
-      if (request.method === 'GET') {
-        return handleAdminUsersGet(request, env);
-      }
-      if (request.method === 'POST') {
-        return handleAdminUsersPost(request, env);
-      }
-      return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, request, env);
-    }
-
-    if (pathname.startsWith('/api/v1/admin/users/')) {
-      const parts = pathname.replace('/api/v1/admin/users/', '').split('/');
-      const targetUserId = parts[0];
-      const subAction = parts[1];
-
-      if (targetUserId && subAction === 'status' && request.method === 'PATCH') {
-        return handleAdminUserStatusPatch(request, env, targetUserId);
+      // Proteção CSRF para requisições com mutação de estado
+      if (!validateCsrf(request)) {
+        return jsonResponse({ ok: false, code: 'CSRF_FORBIDDEN', message: 'Origem não autorizada.' }, 403, request, env);
       }
 
-      if (targetUserId && subAction === 'reset-password' && request.method === 'POST') {
-        return handleAdminUserResetPasswordPost(request, env, targetUserId);
+      const url = new URL(request.url);
+      const { pathname } = url;
+
+      // 1. Health checks
+      if (pathname === '/api/v1/health' && request.method === 'GET') {
+        return jsonResponse({
+          ok: true,
+          service: 'venda-apartamentos',
+          runtime: 'cloudflare-workers',
+        }, 200, request, env);
       }
-    }
 
-    // 5. Contracts endpoints (FAIL-CLOSED)
-    if (pathname.startsWith('/api/v1/contracts')) {
-      return handleContracts(request, env, url);
-    }
+      if (pathname === '/api/v1/db/health' && request.method === 'GET') {
+        return handleDbHealth(request, env);
+      }
 
-    // 6. Transactions endpoints (FAIL-CLOSED)
-    if (pathname.startsWith('/api/v1/transactions')) {
-      return handleTransactions(request, env, url);
-    }
+      // 2. Auth endpoints
+      if (pathname === '/api/v1/auth/login' && request.method === 'POST') {
+        return handleLogin(request, env);
+      }
 
-    // 7. Static assets handling
-    if (env.ASSETS) {
-      return env.ASSETS.fetch(request);
-    }
+      if (pathname === '/api/v1/auth/logout' && request.method === 'POST') {
+        return handleLogout(request, env);
+      }
 
-    return new Response('Not Found', { status: 404 });
+      if (pathname === '/api/v1/auth/me' && request.method === 'GET') {
+        return handleAuthMe(request, env);
+      }
+
+      if (pathname === '/api/v1/auth/change-password' && request.method === 'POST') {
+        return handleChangePassword(request, env);
+      }
+
+      // 3. Admin Bootstrap (Temporário para criação do 1º ADMIN)
+      if (pathname === '/api/v1/admin/bootstrap' && request.method === 'POST') {
+        return handleAdminBootstrap(request, env);
+      }
+
+      // 4. Admin Users Management
+      if (pathname === '/api/v1/admin/users') {
+        if (request.method === 'GET') {
+          return handleAdminUsersGet(request, env);
+        }
+        if (request.method === 'POST') {
+          return handleAdminUsersPost(request, env);
+        }
+        return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, request, env);
+      }
+
+      if (pathname.startsWith('/api/v1/admin/users/')) {
+        const parts = pathname.replace('/api/v1/admin/users/', '').split('/');
+        const targetUserId = parts[0];
+        const subAction = parts[1];
+
+        if (targetUserId && subAction === 'status' && request.method === 'PATCH') {
+          return handleAdminUserStatusPatch(request, env, targetUserId);
+        }
+
+        if (targetUserId && subAction === 'role' && request.method === 'PATCH') {
+          return handleAdminUserRolePatch(request, env, targetUserId);
+        }
+
+        if (targetUserId && subAction === 'reset-password' && request.method === 'POST') {
+          return handleAdminUserResetPasswordPost(request, env, targetUserId);
+        }
+
+        if (targetUserId && !subAction && (request.method === 'PATCH' || request.method === 'PUT')) {
+          return handleAdminUserEditPatch(request, env, targetUserId);
+        }
+      }
+
+      // 5. Contracts endpoints (FAIL-CLOSED)
+      if (pathname.startsWith('/api/v1/contracts')) {
+        return handleContracts(request, env, url);
+      }
+
+      // 6. Transactions endpoints (FAIL-CLOSED)
+      if (pathname.startsWith('/api/v1/transactions')) {
+        return handleTransactions(request, env, url);
+      }
+
+      // 7. Static assets handling
+      if (env.ASSETS) {
+        return env.ASSETS.fetch(request);
+      }
+
+      return new Response('Not Found', { status: 404 });
+    } catch (err: any) {
+      console.error('[Worker] Fatal error:', err);
+      return jsonResponse(
+        { ok: false, code: 'INTERNAL_ERROR', message: 'Erro interno no servidor' },
+        500,
+        request,
+        env
+      );
+    }
   },
 };
+

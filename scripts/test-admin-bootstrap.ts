@@ -51,6 +51,14 @@ class D1Mock {
   exec(sql: string) {
     return this.db.exec(sql);
   }
+
+  async batch(statements: any[]) {
+    const results = [];
+    for (const stmt of statements) {
+      results.push(await stmt.run());
+    }
+    return results;
+  }
 }
 
 async function runBootstrapTests() {
@@ -255,6 +263,7 @@ async function runBootstrapTests() {
   // 16. resposta de sucesso tratada
   const bootstrapRes = await apiService.adminBootstrap(
     {
+      login: 'admin.principal',
       name: 'Admin Principal',
       email: 'admin.principal@incorporadora.com',
       password: 'SenhaForteAdmin123!',
@@ -307,6 +316,7 @@ async function runBootstrapTests() {
   // 14. resposta 401/403 tratada
   const invalidTokenRes = await apiService.adminBootstrap(
     {
+      login: 'outro.admin',
       name: 'Outro Admin',
       email: 'outro@incorporadora.com',
       password: 'OutraSenhaForte123!',
@@ -323,6 +333,7 @@ async function runBootstrapTests() {
   // 15. resposta 409 tratada (após 1º admin já existir)
   const duplicateAdminRes = await apiService.adminBootstrap(
     {
+      login: 'segundo.admin',
       name: 'Tentativa Segundo Admin',
       email: 'segundo.admin@incorporadora.com',
       password: 'SenhaForteAdmin123!',

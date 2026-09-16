@@ -364,13 +364,16 @@ export async function logAuditEvent(
     const id = crypto.randomUUID();
     await db
       .prepare(`
-        INSERT INTO audit_logs (id, contract_id, user_id, action, entity_type, entity_id, details, ip_address, created_at)
-        VALUES (?, NULL, ?, ?, 'USER', ?, ?, ?, datetime('now'))
+        INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details, ip_address, created_at)
+        VALUES (?, ?, ?, 'USER', ?, ?, ?, datetime('now'))
       `)
       .bind(id, userId, action, userId || 'SYSTEM', details ?? null, ipAddress ?? null)
       .run();
-  } catch (err) {
-    console.error('[AuditLog] Erro ao gravar log:', err);
+  } catch (err: any) {
+    console.error('[AuditLog] Erro ao gravar log:', {
+      errorName: err?.name,
+      errorMessage: err?.message,
+    });
   }
 }
 
@@ -1085,7 +1088,40 @@ async function handleAdminEmergencyResetPassword(request: Request, env: Env): Pr
       return jsonResponse({ ok: false, code: 'INVALID_PASSWORD', message: policy.error }, 400, request, env);
     }
 
-    // 3. Funciona somente se existir EXATAMENTE UM administrador no sistema
+    // 2. Localizar login = 'admin'
+    const adminUser = await env.DB
+      .prepare("SELECT id, login, role, status FROM users WHERE login = 'admin'")
+      .first<{ id: string; login: string; role: string; status: string }>();
+
+    if (!adminUser) {
+      return jsonResponse(
+        { ok: false, code: 'NOT_FOUND', message: 'Usuário admin não encontrado.' },
+        404,
+        request,
+        env
+      );
+    }
+
+    // 3. Confirmar role ADMIN e status ACTIVE
+    if (adminUser.role !== 'ADMIN') {
+      return jsonResponse(
+        { ok: false, code: 'FORBIDDEN', message: 'O usuário não é um administrador.' },
+        403,
+        request,
+        env
+      );
+    }
+
+    if (adminUser.status !== 'ACTIVE') {
+      return jsonResponse(
+        { ok: false, code: 'FORBIDDEN', message: 'O administrador não está ativo.' },
+        403,
+        request,
+        env
+      );
+    }
+
+    // 4. Confirmar proteção de administrador (exatamente UM administrador no sistema)
     const adminCountResult = await env.DB
       .prepare("SELECT COUNT(*) as total FROM users WHERE role = 'ADMIN'")
       .first<{ total: number }>();
@@ -1104,46 +1140,40 @@ async function handleAdminEmergencyResetPassword(request: Request, env: Env): Pr
       );
     }
 
-    // 4. Buscar o usuário admin
-    const adminUser = await env.DB
-      .prepare("SELECT id, login, role, status FROM users WHERE login = 'admin' AND role = 'ADMIN'")
-      .first<{ id: string; login: string; role: string; status: string }>();
-
-    if (!adminUser) {
-      return jsonResponse(
-        { ok: false, code: 'NOT_FOUND', message: 'Usuário admin não encontrado.' },
-        404,
-        request,
-        env
-      );
-    }
-
-    // 5. Gerar o password_hash estritamente pela rotina oficial hashPassword do Worker
+    // 5. Gerar o password_hash usando hashPassword() do próprio Worker
     const newPasswordHash = await hashPassword(newPassword);
 
-    // 6. Atualizar SOMENTE password_hash e updated_at
+    // 6. UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?
     await env.DB
       .prepare("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?")
       .bind(newPasswordHash, adminUser.id)
       .run();
 
-    // 7. Revogar auth_sessions existentes desse usuário
+    // 7. Revogar sessões existentes desse usuário
     await env.DB
       .prepare("UPDATE auth_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL")
       .bind(adminUser.id)
       .run();
 
-    // 8. Registrar ADMIN_PASSWORD_RESET em audit_logs (sem nunca registrar ou imprimir a senha)
-    const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || '127.0.0.1';
-    await logAuditEvent(
-      env.DB,
-      adminUser.id,
-      'ADMIN_PASSWORD_RESET',
-      'Senha do administrador redefinida via emergency-reset-password com ADMIN_BOOTSTRAP_TOKEN',
-      clientIp
-    );
+    // 8. Registrar auditoria usando SOMENTE colunas existentes no schema real
+    // IMPORTANTE: O reset da senha NÃO pode ser revertido apenas porque a gravação de audit_logs falhou.
+    try {
+      const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || '127.0.0.1';
+      await logAuditEvent(
+        env.DB,
+        adminUser.id,
+        'ADMIN_PASSWORD_RESET',
+        'Senha do administrador redefinida via emergency-reset-password com ADMIN_BOOTSTRAP_TOKEN',
+        clientIp
+      );
+    } catch (auditErr: any) {
+      console.error('[EmergencyReset] Falha não impeditiva no registro de auditoria:', {
+        errorName: auditErr?.name,
+        errorMessage: auditErr?.message,
+      });
+    }
 
-    // 9. Resposta de sucesso segura: nunca retorna password_hash nem senha
+    // 9. Retornar HTTP 200 (sem nunca retornar password_hash nem credenciais)
     return jsonResponse(
       {
         ok: true,
@@ -1159,8 +1189,11 @@ async function handleAdminEmergencyResetPassword(request: Request, env: Env): Pr
       request,
       env
     );
-  } catch (err: any) {
-    console.error('[AdminEmergencyResetPassword] Erro:', err);
+  } catch (error: any) {
+    console.error('[EmergencyReset]', {
+      errorName: error?.name,
+      errorMessage: error?.message,
+    });
     return jsonResponse(
       {
         ok: false,

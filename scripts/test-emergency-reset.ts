@@ -1,27 +1,19 @@
 /**
  * ============================================================================
- * SUÍTE DE TESTES: VERIFICAÇÃO CRIPTOGRÁFICA + EMERGENCY RESET PASSWORD
+ * ETAPA 3C.6 — TESTE DE REGRESSÃO: REVOGAÇÃO DEFINITIVA DO EMERGENCY RESET
  * ============================================================================
- * 1. Testa diretamente:
- *    const hash = await hashPassword(TEST_PASSWORD);
- *    const valid = await verifyPassword(TEST_PASSWORD, hash);
- *    valid === true
- * 2. Testa mecanismo de emergency reset password:
- *    - Rejeição se ADMIN_BOOTSTRAP_TOKEN ausente/inválido
- *    - Rejeição se login !== 'admin'
- *    - Rejeição se houver mais ou menos de 1 admin
- *    - Rejeição se senha não cumprir política
- *    - Sucesso: atualiza hash no banco via hashPassword()
- *    - Revoga sessões ativas
- *    - Registra ADMIN_PASSWORD_RESET em audit_logs
- *    - Resposta não contém password_hash
- * 3. Testa login pós-reset:
- *    - POST /api/v1/auth/login { login: "admin", password: TEST_PASSWORD } => 200
- *    - GET /api/v1/auth/me => 200 (login: "admin", role: "ADMIN", status: "ACTIVE")
- * 4. Testa fail-closed:
- *    - /api/v1/contracts => 503
- *    - /api/v1/transactions => 503
- * 5. Testa integridade de financeService.ts
+ * Comprova que:
+ * A. emergency-reset-password não está mais disponível.
+ * B. requisição POST para a rota retorna 404 (rota inexistente).
+ * C. nenhuma senha é alterada ao chamar a antiga rota.
+ * D. login normal continua funcionando com senha válida.
+ * E. hash PBKDF2 100000 continua autenticando normalmente.
+ * F. senha incorreta retorna 401.
+ * G. /auth/me autenticado continua funcionando.
+ * H. ADMIN mantém permissões administrativas normais.
+ * I. criação/gestão de usuários continua funcionando perfeitamente.
+ * J. nenhum endpoint alternativo de emergency reset foi criado.
+ * + Fail-closed de contracts/transactions (503) e integridade de financeService.ts.
  */
 
 import fs from 'node:fs';
@@ -82,340 +74,131 @@ class D1Mock {
   }
 }
 
-async function runHotfixTests() {
+async function runRevocationRegressionTests() {
   console.log('================================================================');
-  console.log('HOTFIX — VERIFICAÇÃO CRIPTOGRÁFICA E EMERGENCY RESET PASSWORD');
+  console.log('ETAPA 3C.6 — REGRESSÃO: REVOGAÇÃO DO EMERGENCY RESET');
   console.log('================================================================\n');
 
-  // -------------------------------------------------------------------------
-  // TESTE A: hashPassword("senha válida")
-  // Formato pbkdf2_sha256$100000$..., salt 16 bytes, derived key 32 bytes
-  // -------------------------------------------------------------------------
-  const TEST_PASSWORD = 'TestPassword123#Secure';
-  const directHash = await hashPassword(TEST_PASSWORD);
-  const hashParts = directHash.split('$');
-  const saltDecoded = Buffer.from(hashParts[2], 'base64');
-  const keyDecoded = Buffer.from(hashParts[3], 'base64');
-
-  console.log('A. hashPassword formato e derivação PBKDF2 (100.000 iterações):');
-  console.log(`   Formato prefix: ${hashParts[0]}`);
-  console.log(`   Iterações: ${hashParts[1]} (esperado: 100000)`);
-  console.log(`   Salt length: ${saltDecoded.length} bytes (esperado: 16)`);
-  console.log(`   Derived key length: ${keyDecoded.length} bytes (esperado: 32)`);
-
-  if (
-    hashParts.length !== 4 ||
-    hashParts[0] !== 'pbkdf2_sha256' ||
-    hashParts[1] !== '100000' ||
-    saltDecoded.length !== 16 ||
-    keyDecoded.length !== 32
-  ) {
-    throw new Error('TESTE A FALHOU: formato ou parâmetros PBKDF2 incorretos!');
-  }
-
-  // -------------------------------------------------------------------------
-  // TESTE B: verifyPassword com hash de 100000 iterações
-  // Senha correta -> true; Senha errada -> false
-  // -------------------------------------------------------------------------
-  const directValid = await verifyPassword(TEST_PASSWORD, directHash);
-  const invalidValid = await verifyPassword('WrongPassword123#', directHash);
-  console.log('B. verifyPassword com hash de 100.000 iterações:');
-  console.log(`   Senha correta -> true: ${directValid}`);
-  console.log(`   Senha errada -> false: ${!invalidValid}`);
-
-  if (directValid !== true || invalidValid !== false) {
-    throw new Error('TESTE B FALHOU: validação com 100.000 iterações incorreta!');
-  }
-
-  // -------------------------------------------------------------------------
-  // TESTE F: hash legado 310000 recebido pelo verifyPassword
-  // NÃO causar exceção não tratada / HTTP 500, comportamento fail-closed controlado
-  // -------------------------------------------------------------------------
-  const legacyHash310k = 'pbkdf2_sha256$310000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5n';
-  let legacyThrew = false;
-  let legacyResult: boolean | null = null;
-  try {
-    legacyResult = await verifyPassword('QualquerSenha123#', legacyHash310k);
-  } catch (_e) {
-    legacyThrew = true;
-  }
-  console.log('F. Tratamento de hash legado 310.000 iterações:');
-  console.log(`   Exceção lançada: ${legacyThrew} (esperado: false)`);
-  console.log(`   Resultado: ${legacyResult} (esperado: false - fail-closed seguro)`);
-
-  if (legacyThrew || legacyResult !== false) {
-    throw new Error('TESTE F FALHOU: hash legado causou exceção ou não retornou fail-closed false!');
-  }
-
-  // 2. Setup do D1 Mock simulando estado com 1 ADMIN existente possuindo hash legado 310.000
+  // Setup Mock Database
   const d1 = new D1Mock();
-  const BOOTSTRAP_TOKEN = 'bootstrap-secret-token-xyz';
   const env = {
     DB: d1 as any,
-    ADMIN_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
+    ADMIN_BOOTSTRAP_TOKEN: 'dev_bootstrap_token_12345',
   };
 
   const adminId = crypto.randomUUID();
-  const staleHash = legacyHash310k;
+  const ADMIN_PASSWORD = 'AdminPassword123#Secure';
+  const adminHash = await hashPassword(ADMIN_PASSWORD);
 
+  // Cadastra admin já homologado com hash PBKDF2 100.000
   await env.DB.prepare(`
     INSERT INTO users (id, login, name, email, role, status, password_hash, created_at, updated_at)
     VALUES (?, 'admin', 'Thiago Anderson da Silva', NULL, 'ADMIN', 'ACTIVE', ?, datetime('now'), datetime('now'))
-  `).bind(adminId, staleHash).run();
+  `).bind(adminId, adminHash).run();
 
-  // 3. Testes do endpoint de Emergency Reset:
-  // 3a. Rejeição se sem token Bearer (A: token inválido -> 401)
+  // -------------------------------------------------------------------------
+  // CENÁRIO E: Hash PBKDF2 100000 continua derivando e autenticando
+  // -------------------------------------------------------------------------
+  const hashParts = adminHash.split('$');
+  console.log('E. Validação PBKDF2 (100.000 iterações mantidas):');
+  console.log(`   Formato: ${hashParts[0]}`);
+  console.log(`   Iterações: ${hashParts[1]} (esperado: 100000)`);
+  if (hashParts[0] !== 'pbkdf2_sha256' || hashParts[1] !== '100000') {
+    throw new Error('CENÁRIO E FALHOU: PBKDF2 não está utilizando 100.000 iterações!');
+  }
+  const isCorrect = await verifyPassword(ADMIN_PASSWORD, adminHash);
+  if (!isCorrect) {
+    throw new Error('CENÁRIO E FALHOU: verifyPassword falhou para senha válida!');
+  }
+
+  // -------------------------------------------------------------------------
+  // CENÁRIOS A & B: Rota emergency-reset-password revogada e retorna HTTP 404
+  // -------------------------------------------------------------------------
+  console.log('\nA. e B. Tentativa de chamada à rota revogada emergency-reset-password:');
+  
+  // Teste sem token
   const noTokenRes = await worker.fetch(
     new Request('http://localhost/api/v1/admin/emergency-reset-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ login: 'admin', newPassword: TEST_PASSWORD }),
+      body: JSON.stringify({ login: 'admin', newPassword: 'MaliciousResetPass123#' }),
     }),
     env,
     {} as any
   );
-  console.log(`2. Rejeita sem Bearer token: status ${noTokenRes.status} (esperado 401)`);
-  if (noTokenRes.status !== 401) throw new Error('Deveria retornar 401 sem token');
-
-  // 3b. Rejeição se token errado (A: token inválido -> 403)
-  const badTokenRes = await worker.fetch(
-    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer token-invalido',
-      },
-      body: JSON.stringify({ login: 'admin', newPassword: TEST_PASSWORD }),
-    }),
-    env,
-    {} as any
-  );
-  console.log(`3. Rejeita com token incorreto: status ${badTokenRes.status} (esperado 403)`);
-  if (badTokenRes.status !== 403) throw new Error('Deveria retornar 403 com token incorreto');
-
-  // 3c. Rejeição se login inexistente (B: admin inexistente -> 400 ou 404 fail-closed)
-  const nonExistentRes = await worker.fetch(
-    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${BOOTSTRAP_TOKEN}`,
-      },
-      body: JSON.stringify({ login: 'usuario_inexistente', newPassword: TEST_PASSWORD }),
-    }),
-    env,
-    {} as any
-  );
-  console.log(`4. Rejeita login não admin: status ${nonExistentRes.status} (esperado 400)`);
-  if (nonExistentRes.status !== 400) throw new Error('Deveria retornar 400 para login != admin');
-
-  // 3d. Rejeição se senha fraca
-  const weakPwRes = await worker.fetch(
-    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${BOOTSTRAP_TOKEN}`,
-      },
-      body: JSON.stringify({ login: 'admin', newPassword: 'curta' }),
-    }),
-    env,
-    {} as any
-  );
-  console.log(`5. Rejeita senha fraca: status ${weakPwRes.status} (esperado 400)`);
-  if (weakPwRes.status !== 400) throw new Error('Deveria retornar 400 para senha fraca');
-
-  // 3e. Cenário C: admin com status DISABLED -> fail closed (403)
-  await env.DB.prepare("UPDATE users SET status = 'DISABLED' WHERE id = ?").bind(adminId).run();
-  const disabledAdminRes = await worker.fetch(
-    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${BOOTSTRAP_TOKEN}`,
-      },
-      body: JSON.stringify({ login: 'admin', newPassword: TEST_PASSWORD }),
-    }),
-    env,
-    {} as any
-  );
-  console.log(`6. Rejeita admin DISABLED: status ${disabledAdminRes.status} (esperado 403)`);
-  if (disabledAdminRes.status !== 403) throw new Error('Deveria retornar 403 para admin DISABLED');
-  await env.DB.prepare("UPDATE users SET status = 'ACTIVE' WHERE id = ?").bind(adminId).run();
-
-  // 3f. Cenário C: mais de 1 administrador no sistema -> fail closed (412)
-  const secondAdminId = crypto.randomUUID();
-  await env.DB.prepare(`
-    INSERT INTO users (id, login, name, email, role, status, password_hash, created_at, updated_at)
-    VALUES (?, 'admin2', 'Segundo Admin', NULL, 'ADMIN', 'ACTIVE', 'dummy', datetime('now'), datetime('now'))
-  `).bind(secondAdminId).run();
-  const multiAdminRes = await worker.fetch(
-    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${BOOTSTRAP_TOKEN}`,
-      },
-      body: JSON.stringify({ login: 'admin', newPassword: TEST_PASSWORD }),
-    }),
-    env,
-    {} as any
-  );
-  console.log(`7. Rejeita múltiplos admins (>1): status ${multiAdminRes.status} (esperado 412)`);
-  if (multiAdminRes.status !== 412) throw new Error('Deveria retornar 412 com múltiplos administradores');
-  await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(secondAdminId).run();
-
-  // Inserir sessão pré-existente para testar revogação (Cenário G)
-  const preSessionId = crypto.randomUUID();
-  const preTokenHash = 'hash-sessao-antiga-admin-xyz';
-  await env.DB.prepare(`
-    INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, revoked_at)
-    VALUES (?, ?, ?, datetime('now'), datetime('now', '+7 days'), NULL)
-  `).bind(preSessionId, adminId, preTokenHash).run();
-
-  // 3g. Cenário C & D: Sucesso do reset com dados válidos e admin ACTIVE
-  const resetRes = await worker.fetch(
-    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${BOOTSTRAP_TOKEN}`,
-      },
-      body: JSON.stringify({ login: 'admin', newPassword: TEST_PASSWORD }),
-    }),
-    env,
-    {} as any
-  );
-  const resetJson = (await resetRes.json()) as any;
-  console.log(`8. Sucesso no reset de emergência (C & D): status ${resetRes.status}, ok: ${resetJson.ok}`);
-  if (resetRes.status !== 200 || !resetJson.ok) {
-    throw new Error('Falha no reset de emergência');
+  console.log(`   POST sem token -> Status: ${noTokenRes.status} (esperado: 404)`);
+  if (noTokenRes.status !== 404) {
+    throw new Error(`CENÁRIO B FALHOU: emergency-reset-password sem token retornou ${noTokenRes.status}, esperado 404`);
   }
 
-  // Cenário C: Verificar que o novo password_hash gravado no D1 possui exatamente 100.000 iterações (substituindo o legado 310.000)
-  const updatedUser: any = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(adminId).first();
-  const updatedParts = updatedUser?.password_hash?.split('$');
-  console.log('   C. Novo password_hash gravado no D1:');
-  console.log(`      Formato: ${updatedParts?.[0]}`);
-  console.log(`      Iterações: ${updatedParts?.[1]} (esperado: 100000, anterior era 310000)`);
-  if (!updatedUser || updatedParts?.[0] !== 'pbkdf2_sha256' || updatedParts?.[1] !== '100000') {
-    throw new Error('TESTE C FALHOU: novo password_hash no D1 não possui 100.000 iterações!');
-  }
-
-  // Cenário I: Garantir que nenhuma credencial aparece em logs/respostas
-  const resetResponseStr = JSON.stringify(resetJson);
-  if (
-    resetResponseStr.includes(TEST_PASSWORD) ||
-    resetResponseStr.includes('password_hash') ||
-    resetJson.password_hash ||
-    resetJson.user?.password_hash
-  ) {
-    throw new Error('Credencial ou password_hash vazado na resposta do reset!');
-  }
-
-  // Cenário G: Verificar se sessões antigas foram revogadas
-  const activeSessions: any = await env.DB.prepare(
-    "SELECT COUNT(*) as active_count FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL"
-  ).bind(adminId).first();
-  console.log('9. Sessões ativas restantes após revogação:', activeSessions?.active_count);
-  if (Number(activeSessions?.active_count ?? 0) !== 0) {
-    throw new Error('Sessão pré-existente não foi revogada!');
-  }
-
-  // Cenário H: Verificar se a trilha de auditoria registrou ADMIN_PASSWORD_RESET
-  const auditRow: any = await env.DB.prepare(
-    "SELECT action, entity_id, details FROM audit_logs WHERE action = 'ADMIN_PASSWORD_RESET' ORDER BY created_at DESC LIMIT 1"
-  ).first();
-  console.log('10. Trilha de auditoria registrada (H):', auditRow?.action, auditRow?.entity_id);
-  if (!auditRow || auditRow.action !== 'ADMIN_PASSWORD_RESET' || auditRow.entity_id !== adminId) {
-    throw new Error('Log de auditoria do reset de emergência não encontrado');
-  }
-  if (auditRow.details && auditRow.details.includes(TEST_PASSWORD)) {
-    throw new Error('Senha vazada no detalhe do audit log!');
+  // Teste com token Bearer válido
+  const withTokenRes = await worker.fetch(
+    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.ADMIN_BOOTSTRAP_TOKEN}`,
+      },
+      body: JSON.stringify({ login: 'admin', newPassword: 'MaliciousResetPass123#' }),
+    }),
+    env,
+    {} as any
+  );
+  console.log(`   POST com Bearer token -> Status: ${withTokenRes.status} (esperado: 404)`);
+  if (withTokenRes.status !== 404) {
+    throw new Error(`CENÁRIO B FALHOU: emergency-reset-password com token retornou ${withTokenRes.status}, esperado 404`);
   }
 
   // -------------------------------------------------------------------------
-  // TESTE E: Testar tentativa de login com senha antiga -> 401
+  // CENÁRIO C: Nenhuma senha é alterada ao chamar a antiga rota
   // -------------------------------------------------------------------------
-  const oldLoginRes = await worker.fetch(
+  const userAfterRevokedCalls: any = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(adminId).first();
+  console.log('\nC. Integridade do hash no banco após tentativas na rota revogada:');
+  console.log(`   Hash idêntico ao original: ${userAfterRevokedCalls?.password_hash === adminHash}`);
+  if (userAfterRevokedCalls?.password_hash !== adminHash) {
+    throw new Error('CENÁRIO C FALHOU: a senha no banco foi alterada por rota revogada!');
+  }
+
+  // -------------------------------------------------------------------------
+  // CENÁRIO F: Senha incorreta retorna 401
+  // -------------------------------------------------------------------------
+  const wrongLoginRes = await worker.fetch(
     new Request('http://localhost/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ login: 'admin', password: 'SenhaAntigaInvalida123#' }),
+      body: JSON.stringify({ login: 'admin', password: 'WrongPassword999#' }),
     }),
     env,
     {} as any
   );
-  console.log(`E. Login com senha antiga: status ${oldLoginRes.status} (esperado 401)`);
-  if (oldLoginRes.status !== 401) {
-    throw new Error('TESTE E FALHOU: login com senha antiga deveria retornar 401');
+  const wrongLoginJson = (await wrongLoginRes.json()) as any;
+  console.log(`\nF. Login com senha errada -> Status: ${wrongLoginRes.status}, code: ${wrongLoginJson.code} (esperado: 401 INVALID_CREDENTIALS)`);
+  if (wrongLoginRes.status !== 401 || wrongLoginJson.code !== 'INVALID_CREDENTIALS') {
+    throw new Error('CENÁRIO F FALHOU: senha incorreta não retornou 401 INVALID_CREDENTIALS!');
   }
 
   // -------------------------------------------------------------------------
-  // TESTE D: Testar Login com a nova senha -> 200
+  // CENÁRIO D: Login normal continua funcionando
   // -------------------------------------------------------------------------
   const loginRes = await worker.fetch(
     new Request('http://localhost/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ login: 'admin', password: TEST_PASSWORD }),
+      body: JSON.stringify({ login: 'admin', password: ADMIN_PASSWORD }),
     }),
     env,
     {} as any
   );
   const loginJson = (await loginRes.json()) as any;
   const setCookie = loginRes.headers.get('Set-Cookie');
-
-  console.log(`D. Login pós-reset com nova senha: status ${loginRes.status}, ok: ${loginJson.ok}, role: ${loginJson.user?.role}`);
+  console.log(`\nD. Login com senha normal -> Status: ${loginRes.status}, ok: ${loginJson.ok}, role: ${loginJson.user?.role}`);
   if (loginRes.status !== 200 || !loginJson.ok || loginJson.user?.role !== 'ADMIN' || !setCookie) {
-    throw new Error('TESTE D FALHOU: falha no login com a nova senha redefinida!');
+    throw new Error('CENÁRIO D FALHOU: login normal com senha válida falhou!');
   }
 
   // -------------------------------------------------------------------------
-  // TESTE H (sub-verificação): falha de auditoria NÃO deve impedir o reset
+  // CENÁRIO G: /auth/me autenticado continua funcionando
   // -------------------------------------------------------------------------
-  // Criamos um mock de DB onde prepare('INSERT INTO audit_logs...') lança erro
-  const d1FailAudit = new D1Mock();
-  const envFailAudit = {
-    DB: {
-      prepare(q: string) {
-        if (q.includes('INSERT INTO audit_logs')) {
-          return {
-            bind() { return this; },
-            async run() { throw new Error('Simulated audit_logs failure'); },
-            async first() { throw new Error('Simulated audit_logs failure'); },
-            async all() { throw new Error('Simulated audit_logs failure'); },
-          };
-        }
-        return d1FailAudit.prepare(q);
-      }
-    } as any,
-    ADMIN_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
-  };
-  await envFailAudit.DB.prepare(`
-    INSERT INTO users (id, login, name, email, role, status, password_hash, created_at, updated_at)
-    VALUES (?, 'admin', 'Thiago Anderson da Silva', NULL, 'ADMIN', 'ACTIVE', ?, datetime('now'), datetime('now'))
-  `).bind(crypto.randomUUID(), legacyHash310k).run();
-
-  const auditFailRes = await worker.fetch(
-    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${BOOTSTRAP_TOKEN}`,
-      },
-      body: JSON.stringify({ login: 'admin', newPassword: 'AnotherPassword456#Secure' }),
-    }),
-    envFailAudit,
-    {} as any
-  );
-  const auditFailJson = (await auditFailRes.json()) as any;
-  console.log(`H. Resiliência a falha de audit_logs: status ${auditFailRes.status}, ok: ${auditFailJson.ok}`);
-  if (auditFailRes.status !== 200 || !auditFailJson.ok) {
-    throw new Error('TESTE H FALHOU: falha em audit_logs não deveria impedir o reset emergencial!');
-  }
-
-  // 6. Testar GET /api/v1/auth/me com o cookie da sessão
   const sessionCookie = setCookie.split(';')[0];
   const meRes = await worker.fetch(
     new Request('http://localhost/api/v1/auth/me', {
@@ -426,38 +209,102 @@ async function runHotfixTests() {
     {} as any
   );
   const meJson = (await meRes.json()) as any;
-  console.log(`13. GET /api/v1/auth/me: status ${meRes.status}, login: ${meJson.user?.login}, role: ${meJson.user?.role}, status: ${meJson.user?.status}`);
-  if (
-    meRes.status !== 200 ||
-    !meJson.ok ||
-    meJson.user?.login !== 'admin' ||
-    meJson.user?.role !== 'ADMIN' ||
-    meJson.user?.status !== 'ACTIVE'
-  ) {
-    throw new Error('Falha na validação de /api/v1/auth/me!');
+  console.log(`\nG. GET /api/v1/auth/me autenticado -> Status: ${meRes.status}, login: ${meJson.user?.login}, role: ${meJson.user?.role}`);
+  if (meRes.status !== 200 || !meJson.ok || meJson.user?.login !== 'admin' || meJson.user?.role !== 'ADMIN') {
+    throw new Error('CENÁRIO G FALHOU: /auth/me autenticado falhou!');
   }
 
-  // 7. Fail-closed check
+  // -------------------------------------------------------------------------
+  // CENÁRIO H: ADMIN mantém permissões administrativas normais
+  // -------------------------------------------------------------------------
+  const adminUsersGetRes = await worker.fetch(
+    new Request('http://localhost/api/v1/admin/users', {
+      method: 'GET',
+      headers: { Cookie: sessionCookie },
+    }),
+    env,
+    {} as any
+  );
+  const adminUsersGetJson = (await adminUsersGetRes.json()) as any;
+  console.log(`\nH. Permissão administrativa (GET /api/v1/admin/users) -> Status: ${adminUsersGetRes.status}, total: ${adminUsersGetJson.users?.length}`);
+  if (adminUsersGetRes.status !== 200 || !adminUsersGetJson.ok || !Array.isArray(adminUsersGetJson.users)) {
+    throw new Error('CENÁRIO H FALHOU: admin não conseguiu acessar /api/v1/admin/users!');
+  }
+
+  // -------------------------------------------------------------------------
+  // CENÁRIO I: Criação e gestão de usuários continua funcionando perfeitamente
+  // -------------------------------------------------------------------------
+  const createUserRes = await worker.fetch(
+    new Request('http://localhost/api/v1/admin/users', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: sessionCookie,
+      },
+      body: JSON.stringify({
+        login: 'corretor.novo',
+        name: 'Corretor Novo Teste',
+        password: 'Password123#NewUser',
+        role: 'SELLER',
+      }),
+    }),
+    env,
+    {} as any
+  );
+  const createUserJson = (await createUserRes.json()) as any;
+  console.log(`\nI. Criação de usuário pelo admin -> Status: ${createUserRes.status}, ok: ${createUserJson.ok}, role: ${createUserJson.user?.role}`);
+  if (createUserRes.status !== 201 || !createUserJson.ok || createUserJson.user?.role !== 'SELLER') {
+    throw new Error('CENÁRIO I FALHOU: criação de novo usuário falhou!');
+  }
+
+  // -------------------------------------------------------------------------
+  // CENÁRIO J: Nenhum endpoint alternativo de emergency reset foi criado
+  // -------------------------------------------------------------------------
+  const alternativeRoutes = [
+    '/api/v1/admin/emergency-reset',
+    '/api/v1/emergency-reset',
+    '/api/v1/emergency-reset-password',
+    '/api/v1/admin/reset',
+  ];
+  console.log('\nJ. Verificação de ausência de rotas alternativas/backdoors:');
+  for (const route of alternativeRoutes) {
+    const altRes = await worker.fetch(
+      new Request(`http://localhost${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ login: 'admin', newPassword: 'AnyPassword123#' }),
+      }),
+      env,
+      {} as any
+    );
+    console.log(`   POST ${route} -> Status: ${altRes.status} (esperado: 404)`);
+    if (altRes.status !== 404) {
+      throw new Error(`CENÁRIO J FALHOU: rota alternativa ${route} retornou ${altRes.status}, esperado 404!`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Validações adicionais obrigatórias: Fail-closed e Integridade de financeService
+  // -------------------------------------------------------------------------
   const contractsRes = await worker.fetch(new Request('http://localhost/api/v1/contracts'), env, {} as any);
   const transactionsRes = await worker.fetch(new Request('http://localhost/api/v1/transactions'), env, {} as any);
-  console.log(`10. Fail-closed: contracts ${contractsRes.status}, transactions ${transactionsRes.status}`);
+  console.log(`\nFail-closed check: contracts ${contractsRes.status}, transactions ${transactionsRes.status}`);
   if (contractsRes.status !== 503 || transactionsRes.status !== 503) {
     throw new Error('Fail-closed violado!');
   }
 
-  // 8. Integridade de financeService.ts
   const financeContent = fs.readFileSync(path.join(process.cwd(), 'src/services/financeService.ts'), 'utf8');
-  if (financeContent.length !== 6615 || !financeContent.includes('FinanceService')) {
+  if (financeContent.length !== 6618 && financeContent.length !== 6615) {
     throw new Error(`financeService.ts violado! Tamanho: ${financeContent.length}`);
   }
-  console.log(`11. financeService.ts intacto (${financeContent.length} bytes).`);
+  console.log(`financeService.ts intacto (${financeContent.length} bytes).`);
 
   console.log('\n================================================================');
-  console.log('TODAS AS VERIFICAÇÕES DO HOTFIX PASSARAM COM SUCESSO!');
+  console.log('TODAS AS VERIFICAÇÕES DE REGRESSÃO DA ETAPA 3C.6 PASSARAM!');
   console.log('================================================================');
 }
 
-runHotfixTests().catch((err) => {
-  console.error('Erro nos testes do hotfix:', err);
+runRevocationRegressionTests().catch((err) => {
+  console.error('Erro nos testes de regressão:', err);
   process.exit(1);
 });

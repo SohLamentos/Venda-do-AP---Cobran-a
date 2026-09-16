@@ -109,12 +109,12 @@ async function runAll34Tests() {
   );
 
   // -------------------------------------------------------------------------
-  // 2. hashPassword usa 310.000 iterações
+  // 2. hashPassword usa 100.000 iterações (limite Cloudflare Workers)
   // -------------------------------------------------------------------------
   record(
     2,
-    'hashPassword usa 310.000 iterações',
-    parts1[1] === '310000',
+    'hashPassword usa 100.000 iterações (limite Cloudflare Workers)',
+    parts1[1] === '100000',
     `iterações: ${parts1[1]}`
   );
 
@@ -159,11 +159,11 @@ async function runAll34Tests() {
   const timeReal = Date.now() - t0;
 
   const t1 = Date.now();
-  const dummyHash = 'pbkdf2_sha256$310000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5n';
+  const dummyHash = 'pbkdf2_sha256$100000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5nMTIzNDU2Nw==';
   await verifyPassword('MinhaSenhaForte123!', dummyHash);
   const timeDummy = Date.now() - t1;
 
-  // Ambos devem executar a derivação completa de 310k iterações (~dentro da mesma magnitude de ms)
+  // Ambos devem executar a derivação completa de 100k iterações (~dentro da mesma magnitude de ms)
   record(
     6,
     'verifyPassword tempo é estável (dummy hash para user inexistente)',

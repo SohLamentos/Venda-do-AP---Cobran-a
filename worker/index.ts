@@ -6,8 +6,9 @@
  * 
  * NOTAS DE SEGURANÇA E ARQUITETURA:
  * 1. AUTENTICAÇÃO DEFINITIVA: NATIVA CLOUDFLARE + D1.
- * 2. HASH DE SENHA: PBKDF2-HMAC-SHA256 (310.000 iterações, salt 16 bytes, chave 32 bytes)
+ * 2. HASH DE SENHA: PBKDF2-HMAC-SHA256 (100.000 iterações, salt 16 bytes, chave 32 bytes)
  *    via Web Crypto API. Formato: pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>.
+ *    Compatível com o limite máximo do runtime Cloudflare Workers (máx 100.000 iterações).
  * 3. SESSÕES: Servidor com token opaco (32 bytes aleatórios). Somente o hash SHA-256
  *    do token é salvo na tabela `auth_sessions`. Cookie HttpOnly, SameSite=Lax, Secure.
  * 4. BOOTSTRAP DO PRIMEIRO ADMIN: POST /api/v1/admin/bootstrap protegido por secret
@@ -69,8 +70,9 @@ export interface DbUser {
 
 const SESSION_COOKIE_NAME = 'venda_ap_session';
 const SESSION_DURATION_SECONDS = 7 * 24 * 3600; // 7 dias
-const PBKDF2_ITERATIONS = 310000;
-const DUMMY_HASH = 'pbkdf2_sha256$310000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5n';
+export const PBKDF2_ITERATIONS = 100000;
+export const MAX_PBKDF2_ITERATIONS = 100000;
+const DUMMY_HASH = 'pbkdf2_sha256$100000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5nMTIzNDU2Nw==';
 
 // ============================================================================
 // HELPERS CRIPTOGRÁFICOS (PBKDF2, SHA-256, TOKENS, VALIDAÇÃO)
@@ -160,6 +162,9 @@ export function constantTimeCompare(a: Uint8Array, b: Uint8Array): boolean {
 
 /**
  * Cria hash de senha seguro usando PBKDF2-HMAC-SHA256 via Web Crypto.
+ * Utiliza 100.000 iterações (limite máximo estritamente suportado pelo Cloudflare Workers),
+ * salt criptograficamente aleatório de 16 bytes e chave derivada de 32 bytes (256 bits).
+ * Formato: pbkdf2_sha256$100000$<saltBase64>$<hashBase64>
  */
 export async function hashPassword(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -190,6 +195,9 @@ export async function hashPassword(password: string): Promise<string> {
 
 /**
  * Verifica senha contra hash armazenado com comparação em tempo constante.
+ * Suporta contagens de iterações armazenadas no próprio hash até o limite do runtime (100.000 iterações).
+ * Para hashes legados ou que excedam o limite suportado pelo runtime Cloudflare (>100.000):
+ * Rejeita com fail-closed seguro (retorna false) e log sanitizado, evitando NotSupportedError e HTTP 500.
  */
 export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   try {
@@ -199,6 +207,20 @@ export async function verifyPassword(password: string, storedHash: string): Prom
     }
 
     const iterations = parseInt(parts[1], 10);
+    if (isNaN(iterations) || iterations <= 0) {
+      return false;
+    }
+
+    // Se o hash armazenado solicitar mais iterações do que o runtime Cloudflare suporta (>100.000):
+    // Falha de maneira controlada e segura sem estourar exceção no runtime nem gerar HTTP 500.
+    if (iterations > MAX_PBKDF2_ITERATIONS) {
+      console.warn('[PBKDF2] Hash legado ou não suportado requer mais iterações do que o runtime suporta:', {
+        requestedIterations: iterations,
+        maxSupported: MAX_PBKDF2_ITERATIONS,
+      });
+      return false;
+    }
+
     const salt = base64Decode(parts[2]);
     const expectedHashBytes = base64Decode(parts[3]);
 
@@ -218,11 +240,15 @@ export async function verifyPassword(password: string, storedHash: string): Prom
         hash: 'SHA-256',
       },
       keyMaterial,
-      256
+      256 // 32 bytes
     );
 
     return constantTimeCompare(new Uint8Array(derivedBits), expectedHashBytes);
-  } catch (_e) {
+  } catch (err: any) {
+    console.error('[PBKDF2] Falha na verificação de senha:', {
+      errorName: err?.name,
+      errorMessage: err?.message,
+    });
     return false;
   }
 }

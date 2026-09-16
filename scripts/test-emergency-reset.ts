@@ -87,22 +87,67 @@ async function runHotfixTests() {
   console.log('HOTFIX — VERIFICAÇÃO CRIPTOGRÁFICA E EMERGENCY RESET PASSWORD');
   console.log('================================================================\n');
 
-  // 1. Verificação criptográfica direta obrigatória
+  // -------------------------------------------------------------------------
+  // TESTE A: hashPassword("senha válida")
+  // Formato pbkdf2_sha256$100000$..., salt 16 bytes, derived key 32 bytes
+  // -------------------------------------------------------------------------
   const TEST_PASSWORD = 'TestPassword123#Secure';
   const directHash = await hashPassword(TEST_PASSWORD);
-  const directValid = await verifyPassword(TEST_PASSWORD, directHash);
-  const invalidValid = await verifyPassword('WrongPassword123#', directHash);
+  const hashParts = directHash.split('$');
+  const saltDecoded = Buffer.from(hashParts[2], 'base64');
+  const keyDecoded = Buffer.from(hashParts[3], 'base64');
 
-  console.log('1. Criptografia direta do Worker:');
-  console.log(`   Hash gerado prefix: ${directHash.split('$').slice(0, 2).join('$')}`);
-  console.log(`   verifyPassword(TEST_PASSWORD, hash) === true: ${directValid}`);
-  console.log(`   verifyPassword(WrongPassword, hash) === false: ${!invalidValid}`);
+  console.log('A. hashPassword formato e derivação PBKDF2 (100.000 iterações):');
+  console.log(`   Formato prefix: ${hashParts[0]}`);
+  console.log(`   Iterações: ${hashParts[1]} (esperado: 100000)`);
+  console.log(`   Salt length: ${saltDecoded.length} bytes (esperado: 16)`);
+  console.log(`   Derived key length: ${keyDecoded.length} bytes (esperado: 32)`);
 
-  if (directValid !== true || invalidValid !== false) {
-    throw new Error('Falha na verificação criptográfica direta!');
+  if (
+    hashParts.length !== 4 ||
+    hashParts[0] !== 'pbkdf2_sha256' ||
+    hashParts[1] !== '100000' ||
+    saltDecoded.length !== 16 ||
+    keyDecoded.length !== 32
+  ) {
+    throw new Error('TESTE A FALHOU: formato ou parâmetros PBKDF2 incorretos!');
   }
 
-  // 2. Setup do D1 Mock simulando estado com 1 ADMIN existente
+  // -------------------------------------------------------------------------
+  // TESTE B: verifyPassword com hash de 100000 iterações
+  // Senha correta -> true; Senha errada -> false
+  // -------------------------------------------------------------------------
+  const directValid = await verifyPassword(TEST_PASSWORD, directHash);
+  const invalidValid = await verifyPassword('WrongPassword123#', directHash);
+  console.log('B. verifyPassword com hash de 100.000 iterações:');
+  console.log(`   Senha correta -> true: ${directValid}`);
+  console.log(`   Senha errada -> false: ${!invalidValid}`);
+
+  if (directValid !== true || invalidValid !== false) {
+    throw new Error('TESTE B FALHOU: validação com 100.000 iterações incorreta!');
+  }
+
+  // -------------------------------------------------------------------------
+  // TESTE F: hash legado 310000 recebido pelo verifyPassword
+  // NÃO causar exceção não tratada / HTTP 500, comportamento fail-closed controlado
+  // -------------------------------------------------------------------------
+  const legacyHash310k = 'pbkdf2_sha256$310000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5n';
+  let legacyThrew = false;
+  let legacyResult: boolean | null = null;
+  try {
+    legacyResult = await verifyPassword('QualquerSenha123#', legacyHash310k);
+  } catch (_e) {
+    legacyThrew = true;
+  }
+  console.log('F. Tratamento de hash legado 310.000 iterações:');
+  console.log(`   Exceção lançada: ${legacyThrew} (esperado: false)`);
+  console.log(`   Resultado: ${legacyResult} (esperado: false - fail-closed seguro)`);
+
+  if (legacyThrew || legacyResult !== false) {
+    throw new Error('TESTE F FALHOU: hash legado causou exceção ou não retornou fail-closed false!');
+  }
+
+  // 2. Setup do D1 Mock simulando estado com 1 ADMIN existente possuindo hash legado 310.000
   const d1 = new D1Mock();
   const BOOTSTRAP_TOKEN = 'bootstrap-secret-token-xyz';
   const env = {
@@ -111,7 +156,7 @@ async function runHotfixTests() {
   };
 
   const adminId = crypto.randomUUID();
-  const staleHash = 'pbkdf2_sha256$310000$c2FsdHNhbHRzYWx0MTY=$dGVzdGR1bW15aGFzaHZhbHVlZm9ydGltaW5n';
+  const staleHash = legacyHash310k;
 
   await env.DB.prepare(`
     INSERT INTO users (id, login, name, email, role, status, password_hash, created_at, updated_at)
@@ -228,7 +273,7 @@ async function runHotfixTests() {
     VALUES (?, ?, ?, datetime('now'), datetime('now', '+7 days'), NULL)
   `).bind(preSessionId, adminId, preTokenHash).run();
 
-  // 3g. Cenário D: Sucesso do reset com dados válidos e admin ACTIVE
+  // 3g. Cenário C & D: Sucesso do reset com dados válidos e admin ACTIVE
   const resetRes = await worker.fetch(
     new Request('http://localhost/api/v1/admin/emergency-reset-password', {
       method: 'POST',
@@ -242,9 +287,19 @@ async function runHotfixTests() {
     {} as any
   );
   const resetJson = (await resetRes.json()) as any;
-  console.log(`8. Sucesso no reset de emergência (D): status ${resetRes.status}, ok: ${resetJson.ok}`);
+  console.log(`8. Sucesso no reset de emergência (C & D): status ${resetRes.status}, ok: ${resetJson.ok}`);
   if (resetRes.status !== 200 || !resetJson.ok) {
     throw new Error('Falha no reset de emergência');
+  }
+
+  // Cenário C: Verificar que o novo password_hash gravado no D1 possui exatamente 100.000 iterações (substituindo o legado 310.000)
+  const updatedUser: any = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(adminId).first();
+  const updatedParts = updatedUser?.password_hash?.split('$');
+  console.log('   C. Novo password_hash gravado no D1:');
+  console.log(`      Formato: ${updatedParts?.[0]}`);
+  console.log(`      Iterações: ${updatedParts?.[1]} (esperado: 100000, anterior era 310000)`);
+  if (!updatedUser || updatedParts?.[0] !== 'pbkdf2_sha256' || updatedParts?.[1] !== '100000') {
+    throw new Error('TESTE C FALHOU: novo password_hash no D1 não possui 100.000 iterações!');
   }
 
   // Cenário I: Garantir que nenhuma credencial aparece em logs/respostas
@@ -279,7 +334,9 @@ async function runHotfixTests() {
     throw new Error('Senha vazada no detalhe do audit log!');
   }
 
-  // Cenário F: Testar tentativa de login com senha antiga -> 401
+  // -------------------------------------------------------------------------
+  // TESTE E: Testar tentativa de login com senha antiga -> 401
+  // -------------------------------------------------------------------------
   const oldLoginRes = await worker.fetch(
     new Request('http://localhost/api/v1/auth/login', {
       method: 'POST',
@@ -289,12 +346,14 @@ async function runHotfixTests() {
     env,
     {} as any
   );
-  console.log(`11. Login com senha antiga (F): status ${oldLoginRes.status} (esperado 401)`);
+  console.log(`E. Login com senha antiga: status ${oldLoginRes.status} (esperado 401)`);
   if (oldLoginRes.status !== 401) {
-    throw new Error('Login com senha antiga deveria retornar 401');
+    throw new Error('TESTE E FALHOU: login com senha antiga deveria retornar 401');
   }
 
-  // Cenário E: Testar Login com a nova senha -> 200
+  // -------------------------------------------------------------------------
+  // TESTE D: Testar Login com a nova senha -> 200
+  // -------------------------------------------------------------------------
   const loginRes = await worker.fetch(
     new Request('http://localhost/api/v1/auth/login', {
       method: 'POST',
@@ -307,9 +366,53 @@ async function runHotfixTests() {
   const loginJson = (await loginRes.json()) as any;
   const setCookie = loginRes.headers.get('Set-Cookie');
 
-  console.log(`12. Login pós-reset (E): status ${loginRes.status}, ok: ${loginJson.ok}, role: ${loginJson.user?.role}`);
+  console.log(`D. Login pós-reset com nova senha: status ${loginRes.status}, ok: ${loginJson.ok}, role: ${loginJson.user?.role}`);
   if (loginRes.status !== 200 || !loginJson.ok || loginJson.user?.role !== 'ADMIN' || !setCookie) {
-    throw new Error('Falha no login com a nova senha redefinida!');
+    throw new Error('TESTE D FALHOU: falha no login com a nova senha redefinida!');
+  }
+
+  // -------------------------------------------------------------------------
+  // TESTE H (sub-verificação): falha de auditoria NÃO deve impedir o reset
+  // -------------------------------------------------------------------------
+  // Criamos um mock de DB onde prepare('INSERT INTO audit_logs...') lança erro
+  const d1FailAudit = new D1Mock();
+  const envFailAudit = {
+    DB: {
+      prepare(q: string) {
+        if (q.includes('INSERT INTO audit_logs')) {
+          return {
+            bind() { return this; },
+            async run() { throw new Error('Simulated audit_logs failure'); },
+            async first() { throw new Error('Simulated audit_logs failure'); },
+            async all() { throw new Error('Simulated audit_logs failure'); },
+          };
+        }
+        return d1FailAudit.prepare(q);
+      }
+    } as any,
+    ADMIN_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
+  };
+  await envFailAudit.DB.prepare(`
+    INSERT INTO users (id, login, name, email, role, status, password_hash, created_at, updated_at)
+    VALUES (?, 'admin', 'Thiago Anderson da Silva', NULL, 'ADMIN', 'ACTIVE', ?, datetime('now'), datetime('now'))
+  `).bind(crypto.randomUUID(), legacyHash310k).run();
+
+  const auditFailRes = await worker.fetch(
+    new Request('http://localhost/api/v1/admin/emergency-reset-password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${BOOTSTRAP_TOKEN}`,
+      },
+      body: JSON.stringify({ login: 'admin', newPassword: 'AnotherPassword456#Secure' }),
+    }),
+    envFailAudit,
+    {} as any
+  );
+  const auditFailJson = (await auditFailRes.json()) as any;
+  console.log(`H. Resiliência a falha de audit_logs: status ${auditFailRes.status}, ok: ${auditFailJson.ok}`);
+  if (auditFailRes.status !== 200 || !auditFailJson.ok) {
+    throw new Error('TESTE H FALHOU: falha em audit_logs não deveria impedir o reset emergencial!');
   }
 
   // 6. Testar GET /api/v1/auth/me com o cookie da sessão

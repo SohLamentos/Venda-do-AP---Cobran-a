@@ -46,6 +46,7 @@ import { Login } from './components/Login';
 import { AdminBootstrap } from './components/AdminBootstrap';
 import { AdminPanel } from './components/AdminPanel';
 import { SellerPanel } from './components/SellerPanel';
+import { BuyerJourney } from './components/BuyerJourney';
 
 
 const fileToBase64 = (file: File): Promise<string> => {
@@ -984,28 +985,30 @@ export default function App() {
               </button>
             )}
 
-            <button 
-              onClick={() => {
-                if (config.status !== 'ACTIVE') {
-                  setActionFeedback({
-                    type: 'error',
-                    message: 'Lançamentos financeiros só são permitidos após a ativação do contrato.',
-                  });
-                  return;
-                }
-                setActiveTab('transactions');
-              }}
-              title={config.status !== 'ACTIVE' ? "O contrato precisa ser ativado antes de novos lançamentos" : "Novo Lançamento"}
-              className={cn(
-                "flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all shadow-sm cursor-pointer",
-                config.status === 'ACTIVE'
-                  ? "bg-indigo-600 text-white hover:bg-indigo-700"
-                  : "bg-slate-200 text-slate-600 hover:bg-slate-300"
-              )}
-            >
-              <Plus size={16} />
-              <span className="hidden sm:inline">Novo Lançamento</span>
-            </button>
+            {user.role !== 'BUYER' && (
+              <button 
+                onClick={() => {
+                  if (config.status !== 'ACTIVE') {
+                    setActionFeedback({
+                      type: 'error',
+                      message: 'Lançamentos financeiros só são permitidos após a ativação do contrato.',
+                    });
+                    return;
+                  }
+                  setActiveTab('transactions');
+                }}
+                title={config.status !== 'ACTIVE' ? "O contrato precisa ser ativado antes de novos lançamentos" : "Novo Lançamento"}
+                className={cn(
+                  "flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all shadow-sm cursor-pointer",
+                  config.status === 'ACTIVE'
+                    ? "bg-indigo-600 text-white hover:bg-indigo-700"
+                    : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                )}
+              >
+                <Plus size={16} />
+                <span className="hidden sm:inline">Novo Lançamento</span>
+              </button>
+            )}
 
             <div className="hidden sm:flex items-center gap-2 pl-3 border-l border-slate-200">
               <div className="text-right">
@@ -1056,186 +1059,14 @@ export default function App() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
-                className="space-y-8"
               >
-                {/* Stats Grid - Resumo Principal */}
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-                  <StatCard 
-                    label="Saldo Devedor" 
-                    value={formatCurrency(stats.currentBalance)} 
-                    sub="Valor atualizado para quitação"
-                    icon={<DollarSign className="text-white" />}
-                    color="indigo"
-                    highlight
-                  />
-                  <StatCard 
-                    label="Total já Pago" 
-                    value={formatCurrency(stats.totalPaid)} 
-                    sub="Soma de todas as parcelas"
-                    icon={<ArrowUpRight className="text-emerald-600" />}
-                    color="emerald"
-                  />
-                  <StatCard 
-                    label="Parcelas Quitadas" 
-                    value={`${stats.paidCount} / ${stats.totalCount}`} 
-                    sub={`${Math.round((stats.paidCount / stats.totalCount) * 100)}% do prazo concluído`}
-                    icon={<TrendingDown className="text-amber-600" />}
-                    color="amber"
-                    progress={stats.paidCount / stats.totalCount}
-                  />
-                  <StatCard 
-                    label="Tempo Restante" 
-                    value={`${stats.remainingMonths} meses`} 
-                    sub="Previsão para encerramento"
-                    icon={<History className="text-slate-600" />}
-                    color="indigo"
-                  />
-                </div>
-
-                {/* Composição Financeira */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                  <div className="lg:col-span-2 space-y-6">
-                    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-                      <div className="flex items-center justify-between mb-8">
-                        <div>
-                          <h3 className="font-bold text-slate-800">Evolução do Financiamento</h3>
-                          <p className="text-xs text-slate-400 font-medium">Projeção do saldo devedor até a quitação</p>
-                        </div>
-                        <div className="flex items-center gap-4 text-[10px] font-bold uppercase tracking-wider">
-                           <div className="flex items-center gap-1.5">
-                             <div className="w-2.5 h-2.5 rounded-full bg-indigo-600" />
-                             <span className="text-slate-600">Situação Atual</span>
-                           </div>
-                           <div className="flex items-center gap-1.5">
-                             <div className="w-2.5 h-2.5 rounded-full bg-slate-300" />
-                             <span className="text-slate-400">Pagando todas as parcelas</span>
-                           </div>
-                        </div>
-                      </div>
-                      <div className="h-[320px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <AreaChart data={chartData}>
-                            <defs>
-                              <linearGradient id="colorSaldo" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.1}/>
-                                <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
-                              </linearGradient>
-                            </defs>
-                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                            <XAxis 
-                              dataKey="name" 
-                              axisLine={false} 
-                              tickLine={false} 
-                              tick={{ fontSize: 10, fill: '#94a3b8' }} 
-                              minTickGap={30}
-                              label={{ value: 'Parcelas', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#cbd5e1' }}
-                            />
-                            <YAxis 
-                              axisLine={false} 
-                              tickLine={false} 
-                              tick={{ fontSize: 10, fill: '#94a3b8' }}
-                              tickFormatter={(v) => `R$ ${v/1000}k`}
-                              domain={[0, 'auto']}
-                            />
-                            <Tooltip 
-                              contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                              formatter={(value: number) => formatCurrency(value)}
-                              labelFormatter={(label) => `Parcela #${label}`}
-                            />
-                            <Area type="monotone" dataKey="saldoAtual" stroke="#4f46e5" strokeWidth={3} fillOpacity={1} fill="url(#colorSaldo)" />
-                            <Area type="monotone" dataKey="saldoIdeal" stroke="#cbd5e1" strokeWidth={2} strokeDasharray="5 5" fill="none" />
-                          </AreaChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-
-                    {/* Insights Inteligentes */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                       <InsightCard 
-                         icon={<Percent className="text-emerald-500" />}
-                         title="Dívida Quitada"
-                         value={formatPercent(stats.debtPaidPercent * 100)}
-                         description="Do valor total financiado"
-                       />
-                       <InsightCard 
-                         icon={<TrendingDown className="text-rose-500" />}
-                         title="Custo de Juros"
-                         value={formatPercent(stats.interestRatio * 100)}
-                         description="Dos seus pagamentos totais"
-                       />
-                       <InsightCard 
-                         icon={<Info className="text-indigo-500" />}
-                         title="Impacto da TR"
-                         value={formatCurrency(stats.totalTR)}
-                         description="Acumulado no saldo devedor"
-                       />
-                    </div>
-                  </div>
-
-                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col">
-                    <h3 className="font-bold text-slate-800 mb-6">Composição Financeira</h3>
-                    <div className="flex-1 space-y-6">
-                      <CompositionItem 
-                        label="Principal Amortizado" 
-                        amount={stats.amortizedPrincipal} 
-                        total={stats.totalPaid + stats.currentBalance} 
-                        color="bg-emerald-500" 
-                      />
-                      <CompositionItem 
-                        label="Juros Pagos" 
-                        amount={stats.totalInterest} 
-                        total={stats.totalPaid + stats.currentBalance} 
-                        color="bg-rose-500" 
-                      />
-                      <CompositionItem 
-                        label="Correção TR" 
-                        amount={stats.totalTR} 
-                        total={stats.totalPaid + stats.currentBalance} 
-                        color="bg-indigo-500" 
-                      />
-                      <CompositionItem 
-                        label="Lances Extra" 
-                        amount={stats.totalLances} 
-                        total={stats.totalPaid + stats.currentBalance} 
-                        color="bg-amber-500" 
-                      />
-                    </div>
-                    
-                    <div className="mt-10 p-5 rounded-2xl bg-slate-50 border border-slate-100 space-y-4">
-                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-center">Status de Quitação</p>
-                       <div className="flex items-center justify-center">
-                          <div className="relative w-24 h-24">
-                             <svg className="w-full h-full" viewBox="0 0 36 36">
-                                <path
-                                  className="text-slate-200"
-                                  strokeDasharray="100, 100"
-                                  d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="3"
-                                />
-                                <motion.path
-                                  initial={{ strokeDasharray: "0, 100" }}
-                                  animate={{ strokeDasharray: `${Math.round(stats.debtPaidPercent * 100)}, 100` }}
-                                  className="text-emerald-500"
-                                  d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="3"
-                                  strokeLinecap="round"
-                                />
-                             </svg>
-                             <div className="absolute inset-0 flex flex-col items-center justify-center">
-                                <span className="text-xl font-black text-slate-900">{Math.round(stats.debtPaidPercent * 100)}%</span>
-                             </div>
-                          </div>
-                       </div>
-                       <p className="text-xs font-semibold text-slate-500 text-center leading-relaxed">
-                          Você já quitou {formatCurrency(stats.amortizedPrincipal)} do capital original.
-                       </p>
-                    </div>
-                  </div>
-                </div>
+                <BuyerJourney 
+                  config={config}
+                  transactions={transactions}
+                  amortization={amortization}
+                  user={user}
+                  onNavigateToTransactions={() => setActiveTab('transactions')}
+                />
               </motion.div>
             )}
 
@@ -1309,12 +1140,15 @@ export default function App() {
                             <div className="flex flex-col leading-tight">
                               <span>{format(row.date, 'MM/yyyy')}</span>
                               <span className={cn(
-                                "text-[9px] font-bold uppercase",
-                                row.status === 'PAGO' ? "text-emerald-500" :
-                                row.status === 'QUITADO' ? "text-indigo-500" :
-                                row.status === 'ATRASO' ? "text-rose-500" : "text-slate-300"
+                                "text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border inline-block w-fit mt-0.5",
+                                row.status === 'PAGO' || safeNumber(row.paymentDone) > 0 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                                row.status === 'QUITADO' ? "bg-indigo-50 text-indigo-700 border-indigo-200" :
+                                row.status === 'ATRASO' ? "bg-rose-50 text-rose-700 border-rose-200" :
+                                "bg-slate-100 text-slate-500 border-slate-200"
                               )}>
-                                {row.status}
+                                {row.status === 'PAGO' || safeNumber(row.paymentDone) > 0 ? 'PAGO' :
+                                 row.status === 'QUITADO' ? 'QUITADO' :
+                                 row.status === 'ATRASO' ? 'ATRASO' : 'PREVISTO'}
                               </span>
                             </div>
                           </td>
@@ -1349,21 +1183,29 @@ export default function App() {
                 exit={{ opacity: 0, scale: 0.95 }}
                 className="grid grid-cols-1 lg:grid-cols-3 gap-8"
               >
-                <div className="lg:col-span-1 space-y-6">
-                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-                    <h3 className="font-bold text-slate-800 mb-6">Registrar Pagamento / Lance</h3>
-                    <TransactionForm 
-                      onAdd={handleAddTransaction} 
-                      maxInstallment={config.termMonths}
-                      installmentAmount={config.fixedInstallment}
-                      transactions={transactions}
-                    />
+                {user.role !== 'BUYER' && (
+                  <div className="lg:col-span-1 space-y-6">
+                    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+                      <h3 className="font-bold text-slate-800 mb-6">Registrar Pagamento / Lance</h3>
+                      <TransactionForm 
+                        onAdd={handleAddTransaction} 
+                        maxInstallment={config.termMonths}
+                        installmentAmount={config.fixedInstallment}
+                        transactions={transactions}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
-                <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                <div className={cn(
+                  "bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm",
+                  user.role === 'BUYER' ? "lg:col-span-3" : "lg:col-span-2"
+                )}>
                    <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                     <h3 className="font-bold text-slate-800">Histórico de Movimentações</h3>
+                     <div>
+                       <h3 className="font-bold text-slate-800">Histórico de Movimentações</h3>
+                       <p className="text-xs text-slate-400">Extrato oficial dos pagamentos registrados no sistema</p>
+                     </div>
                      <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{transactions.length} LANÇAMENTOS</span>
                    </div>
                    <div className="overflow-x-auto">
@@ -1376,13 +1218,15 @@ export default function App() {
                               <th className="px-6 py-4 font-bold text-slate-600">Valor</th>
                               <th className="px-6 py-4 font-bold text-slate-600">Método</th>
                               <th className="px-6 py-4 font-bold text-slate-600 text-center">Doc</th>
-                              <th className="px-6 py-4 font-bold text-slate-600 text-right pr-6">Ação</th>
+                              {user.role !== 'BUYER' && (
+                                <th className="px-6 py-4 font-bold text-slate-600 text-right pr-6">Ação</th>
+                              )}
                             </tr>
                           </thead>
                       <tbody className="divide-y divide-slate-100">
                         {(!Array.isArray(transactions) || transactions.length === 0) ? (
                           <tr>
-                            <td colSpan={6} className="px-6 py-12 text-center text-slate-400 italic">Nenhum lançamento registrado ainda.</td>
+                            <td colSpan={user.role === 'BUYER' ? 6 : 7} className="px-6 py-12 text-center text-slate-400 italic">Nenhum lançamento registrado ainda.</td>
                           </tr>
                         ) : (
                           [...transactions].sort((a, b) => {
@@ -1397,7 +1241,7 @@ export default function App() {
                                 <span className={cn(
                                   "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full border",
                                   tx.type === 'LANCE' ? "bg-amber-50 text-amber-600 border-amber-200" : "bg-emerald-50 text-emerald-600 border-emerald-200"
-                                )}>
+                                  )}>
                                   {tx.type}
                                 </span>
                               </td>
@@ -1416,14 +1260,16 @@ export default function App() {
                                   <span className="text-slate-300">-</span>
                                 )}
                               </td>
-                              <td className="px-6 py-4 text-right pr-6">
-                                <button 
-                                  onClick={() => handleDeleteTransaction(tx.id)}
-                                  className="text-rose-500 hover:text-rose-700 p-2 rounded-lg transition-colors"
-                                >
-                                  Excluir
-                                </button>
-                              </td>
+                              {user.role !== 'BUYER' && (
+                                <td className="px-6 py-4 text-right pr-6">
+                                  <button 
+                                    onClick={() => handleDeleteTransaction(tx.id)}
+                                    className="text-rose-500 hover:text-rose-700 p-2 rounded-lg transition-colors"
+                                  >
+                                    Excluir
+                                  </button>
+                                </td>
+                              )}
                             </tr>
                           ))
                         )}

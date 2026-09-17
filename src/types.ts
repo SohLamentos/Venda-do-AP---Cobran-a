@@ -1,3 +1,5 @@
+export type ContractStatus = 'DRAFT' | 'ACTIVE';
+
 export interface ContractConfig {
   id?: string;
   name?: string;
@@ -10,6 +12,9 @@ export interface ContractConfig {
   finePercent: number;
   trMode: 'MONTHLY' | 'ANNUAL';
   ownerId?: string;
+  status?: ContractStatus;
+  activatedAt?: string | null;
+  activatedBy?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }

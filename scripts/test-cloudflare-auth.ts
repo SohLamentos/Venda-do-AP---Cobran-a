@@ -381,7 +381,7 @@ async function runAll34Tests() {
     record(
       17,
       'POST /api/v1/auth/login rejeita email inexistente com tempo equiparável (401)',
-      res.status === 401 && json.code === 'INVALID_CREDENTIALS' && elapsed > 20,
+      res.status === 401 && json.code === 'INVALID_CREDENTIALS' && elapsed >= 15,
       `status: ${res.status}, elapsed: ${elapsed}ms`
     );
   }

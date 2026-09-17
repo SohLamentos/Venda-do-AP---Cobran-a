@@ -28,6 +28,7 @@ export interface Env {
   RECEIPTS?: R2Bucket;
   ASSETS?: Fetcher;
   ADMIN_BOOTSTRAP_TOKEN?: string;
+  ENABLE_D1_PERSISTENCE?: string;
   // Mantidos temporariamente para fallback / rollback se necessário
   FIREBASE_PROJECT_ID?: string;
   FIREBASE_JWKS_URL?: string;
@@ -903,6 +904,28 @@ async function ensureDatabaseSchema(db: D1Database): Promise<void> {
         await db.prepare("CREATE INDEX IF NOT EXISTS idx_auth_attempts_login ON auth_login_attempts(login, attempted_at)").run();
       } catch (_e) {}
     }
+
+    // Checagem contracts (status, activated_at, activated_by)
+    const contractsInfo = await db.prepare("PRAGMA table_info(contracts)").all();
+    const contractCols = (contractsInfo.results || []).map((r: any) => r.name);
+    if (contractCols.length > 0) {
+      if (!contractCols.includes('status')) {
+        try {
+          await db.prepare("ALTER TABLE contracts ADD COLUMN status TEXT NOT NULL DEFAULT 'DRAFT'").run();
+          await db.prepare("CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status)").run();
+        } catch (_e) {}
+      }
+      if (!contractCols.includes('activated_at')) {
+        try {
+          await db.prepare("ALTER TABLE contracts ADD COLUMN activated_at TEXT").run();
+        } catch (_e) {}
+      }
+      if (!contractCols.includes('activated_by')) {
+        try {
+          await db.prepare("ALTER TABLE contracts ADD COLUMN activated_by TEXT").run();
+        } catch (_e) {}
+      }
+    }
     schemaChecked = true;
   } catch (err) {
     console.warn('[AutoMigration] Schema check aviso:', err);
@@ -1593,32 +1616,61 @@ async function handleDbHealth(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * Handle contracts endpoints (FAIL-CLOSED: 503)
+ * Helper to format contract row from database
  */
-async function handleContracts(request: Request, env: Env, _url: URL): Promise<Response> {
-  const D1_PERSISTENCE_ENABLED = false;
-  if (!D1_PERSISTENCE_ENABLED) {
-    return jsonResponse(
-      {
-        ok: false,
-        code: 'D1_PERSISTENCE_NOT_ENABLED',
-        message: 'Persistência D1 ainda não habilitada para produção.',
-      },
-      503,
-      request,
-      env
-    );
-  }
-
-  return jsonResponse({ ok: false, error: 'Unavailable' }, 503, request, env);
+function formatContractDbRow(row: any) {
+  return {
+    id: row.id,
+    name: row.name,
+    propertyDescription: row.property_description || '',
+    financedAmount: Number(row.financed_amount || 0),
+    fixedInstallment: Number(row.fixed_installment || 0),
+    annualInterestRate: Number(row.annual_interest_rate || 0),
+    termMonths: Number(row.term_months || 0),
+    startDate: row.start_date || '',
+    finePercent: Number(row.fine_percent || 0),
+    trMode: row.tr_mode || 'ANNUAL',
+    status: row.status || 'DRAFT',
+    activatedAt: row.activated_at || null,
+    activatedBy: row.activated_by || null,
+    ownerId: row.user_id || undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 /**
- * Handle transactions endpoints (FAIL-CLOSED: 503)
+ * Helper to format transaction row from database
  */
-async function handleTransactions(request: Request, env: Env, _url: URL): Promise<Response> {
-  const D1_PERSISTENCE_ENABLED = false;
-  if (!D1_PERSISTENCE_ENABLED) {
+function formatTransactionDbRow(row: any) {
+  return {
+    id: row.id,
+    contractId: row.contract_id,
+    date: row.date,
+    installmentNumber: row.installment_number,
+    amount: Number(row.amount || 0),
+    type: row.type as 'PAYMENT' | 'LANCE',
+    method: row.method || 'PIX',
+    observation: row.observation || '',
+    status: row.status || 'PAGO',
+    receiptKey: row.receipt_key || undefined,
+    receiptFileName: row.receipt_file_name || undefined,
+    receiptMimeType: row.receipt_mime_type || undefined,
+    receiptBase64: row.receipt_key && row.receipt_key.startsWith('data:') ? row.receipt_key : undefined,
+    createdBy: row.created_by || undefined,
+    createdByEmail: row.created_by_email || undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Handle contracts endpoints
+ * Default: FAIL-CLOSED (503) unless ENABLE_D1_PERSISTENCE === 'true'
+ */
+async function handleContracts(request: Request, env: Env, url: URL): Promise<Response> {
+  const isPersistenceEnabled = env.ENABLE_D1_PERSISTENCE === 'true';
+  if (!isPersistenceEnabled) {
     return jsonResponse(
       {
         ok: false,
@@ -1631,7 +1683,391 @@ async function handleTransactions(request: Request, env: Env, _url: URL): Promis
     );
   }
 
-  return jsonResponse({ ok: false, error: 'Unavailable' }, 503, request, env);
+  if (!env.DB) {
+    return jsonResponse({ ok: false, error: 'Database not available' }, 503, request, env);
+  }
+
+  await ensureDatabaseSchema(env.DB);
+
+  let user: SessionUser;
+  try {
+    user = await requireSessionUser(request, env);
+  } catch (_e) {
+    return jsonResponse({ ok: false, code: 'UNAUTHORIZED', message: 'Sessão inválida ou expirada.' }, 401, request, env);
+  }
+
+  const pathname = url.pathname;
+  const pathParts = pathname.split('/').filter(Boolean); // ['api', 'v1', 'contracts', ...]
+  const contractId = pathParts[3];
+  const subAction = pathParts[4]; // e.g. 'activate'
+
+  // 1. GET /api/v1/contracts -> List contracts
+  if (!contractId && request.method === 'GET') {
+    let query = 'SELECT * FROM contracts ORDER BY created_at DESC';
+    let params: any[] = [];
+    if (user.role === 'BUYER') {
+      query = 'SELECT * FROM contracts WHERE user_id = ? OR status = "ACTIVE" ORDER BY created_at DESC';
+      params = [user.id];
+    }
+    const { results } = await env.DB.prepare(query).bind(...params).all<any>();
+    const contracts = (results || []).map(formatContractDbRow);
+    return jsonResponse({ ok: true, contracts }, 200, request, env);
+  }
+
+  // 2. POST /api/v1/contracts -> Create new contract in DRAFT
+  if (!contractId && request.method === 'POST') {
+    if (user.role !== 'ADMIN' && user.role !== 'SELLER') {
+      return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Apenas Vendedor ou Administrador pode criar contratos.' }, 403, request, env);
+    }
+
+    const body = (await request.json().catch(() => ({}))) as any;
+    const {
+      name,
+      propertyDescription,
+      financedAmount,
+      fixedInstallment,
+      annualInterestRate,
+      termMonths,
+      startDate,
+      finePercent,
+      trMode,
+    } = body || {};
+
+    const newId = body.id && typeof body.id === 'string' && body.id.trim() ? body.id.trim() : crypto.randomUUID();
+    const contractName = name && typeof name === 'string' && name.trim() ? name.trim() : 'Contrato Principal';
+    const propDesc = propertyDescription && typeof propertyDescription === 'string' ? propertyDescription.trim() : '';
+    const financed = Number(financedAmount) || 0;
+    const installment = Number(fixedInstallment) || 0;
+    const interest = Number(annualInterestRate) || 0;
+    const term = Number(termMonths) || 0;
+    const start = startDate && typeof startDate === 'string' ? startDate.trim() : '';
+    const fine = Number(finePercent) || 0;
+    const tr = trMode === 'MONTHLY' ? 'MONTHLY' : 'ANNUAL';
+
+    await env.DB.prepare(`
+      INSERT INTO contracts (
+        id, user_id, name, property_description, financed_amount, fixed_installment,
+        annual_interest_rate, term_months, start_date, fine_percent, tr_mode, status,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', datetime('now'), datetime('now'))
+    `).bind(
+      newId,
+      user.id,
+      contractName,
+      propDesc,
+      financed,
+      installment,
+      interest,
+      term,
+      start,
+      fine,
+      tr
+    ).run();
+
+    const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+    await logAuditEvent(env.DB, newId, 'CONTRACT_CREATED', `Contrato rascunho criado por @${user.login}`, clientIp);
+
+    const created = await env.DB.prepare('SELECT * FROM contracts WHERE id = ?').bind(newId).first<any>();
+    return jsonResponse({ ok: true, contract: formatContractDbRow(created) }, 201, request, env);
+  }
+
+  // Contract specific routes: /api/v1/contracts/:id
+  if (contractId) {
+    const existing = await env.DB.prepare('SELECT * FROM contracts WHERE id = ?').bind(contractId).first<any>();
+    if (!existing) {
+      return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Contrato não encontrado.' }, 404, request, env);
+    }
+
+    // GET /api/v1/contracts/:id
+    if (!subAction && request.method === 'GET') {
+      if (user.role === 'BUYER' && existing.status !== 'ACTIVE' && existing.user_id && existing.user_id !== user.id) {
+        return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Acesso não autorizado a este contrato.' }, 403, request, env);
+      }
+      return jsonResponse({ ok: true, contract: formatContractDbRow(existing) }, 200, request, env);
+    }
+
+    // POST /api/v1/contracts/:id/activate -> ATIVAÇÃO ATÔMICA
+    if (subAction === 'activate' && request.method === 'POST') {
+      if (user.role !== 'ADMIN' && user.role !== 'SELLER') {
+        return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Apenas Vendedor ou Administrador pode ativar contratos.' }, 403, request, env);
+      }
+
+      if (existing.status === 'ACTIVE') {
+        return jsonResponse({ ok: false, code: 'CONTRACT_ALREADY_ACTIVE', message: 'Contrato já se encontra ativo.' }, 409, request, env);
+      }
+
+      // Validação estrita dos parâmetros estruturais antes da ativação
+      const financed = Number(existing.financed_amount || 0);
+      const installment = Number(existing.fixed_installment || 0);
+      const term = Number(existing.term_months || 0);
+      const interest = Number(existing.annual_interest_rate || 0);
+      const fine = Number(existing.fine_percent || 0);
+      const start = existing.start_date;
+      const nameVal = existing.name;
+
+      if (!nameVal || typeof nameVal !== 'string' || !nameVal.trim()) {
+        return jsonResponse({ ok: false, code: 'INVALID_CONTRACT_PARAMETERS', message: 'Nome ou identificação do contrato é obrigatório.' }, 400, request, env);
+      }
+      if (isNaN(financed) || financed <= 0) {
+        return jsonResponse({ ok: false, code: 'INVALID_CONTRACT_PARAMETERS', message: 'Valor financiado deve ser maior que zero.' }, 400, request, env);
+      }
+      if (isNaN(installment) || installment <= 0) {
+        return jsonResponse({ ok: false, code: 'INVALID_CONTRACT_PARAMETERS', message: 'Parcela base deve ser maior que zero.' }, 400, request, env);
+      }
+      if (isNaN(term) || term <= 0 || !Number.isInteger(term)) {
+        return jsonResponse({ ok: false, code: 'INVALID_CONTRACT_PARAMETERS', message: 'Prazo contratual deve ser de no mínimo 1 mês.' }, 400, request, env);
+      }
+      if (!start || typeof start !== 'string' || !start.trim()) {
+        return jsonResponse({ ok: false, code: 'INVALID_CONTRACT_PARAMETERS', message: 'Data inicial do contrato é obrigatória.' }, 400, request, env);
+      }
+      if (isNaN(interest) || interest < 0) {
+        return jsonResponse({ ok: false, code: 'INVALID_CONTRACT_PARAMETERS', message: 'Taxa de juros anual não pode ser negativa.' }, 400, request, env);
+      }
+      if (isNaN(fine) || fine < 0) {
+        return jsonResponse({ ok: false, code: 'INVALID_CONTRACT_PARAMETERS', message: 'Multa não pode ser negativa.' }, 400, request, env);
+      }
+
+      // Ativação atômica
+      await env.DB.prepare(`
+        UPDATE contracts
+        SET status = 'ACTIVE',
+            activated_at = datetime('now'),
+            activated_by = ?,
+            updated_at = datetime('now')
+        WHERE id = ? AND status = 'DRAFT'
+      `).bind(user.login, contractId).run();
+
+      const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+      await logAuditEvent(env.DB, contractId, 'CONTRACT_ACTIVATED', `Contrato ativado com parâmetros bloqueados por @${user.login}`, clientIp);
+
+      const updated = await env.DB.prepare('SELECT * FROM contracts WHERE id = ?').bind(contractId).first<any>();
+      return jsonResponse(
+        {
+          ok: true,
+          message: 'Contrato ativado com sucesso. Parâmetros contratuais bloqueados.',
+          contract: formatContractDbRow(updated),
+        },
+        200,
+        request,
+        env
+      );
+    }
+
+    // PUT ou PATCH /api/v1/contracts/:id -> Edição de parâmetros estruturais
+    if (!subAction && (request.method === 'PUT' || request.method === 'PATCH')) {
+      if (user.role !== 'ADMIN' && user.role !== 'SELLER') {
+        return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Apenas Vendedor ou Administrador pode alterar contratos.' }, 403, request, env);
+      }
+
+      // IMUTABILIDADE DO CONTRATO ACTIVE (HTTP 409 CONTRACT_LOCKED)
+      // Sem exceção, sem bypass de ADMIN, sem force=true
+      if (existing.status === 'ACTIVE') {
+        return jsonResponse(
+          {
+            ok: false,
+            code: 'CONTRACT_LOCKED',
+            message: 'Contrato ativo. Parâmetros contratuais estão bloqueados e não podem ser alterados.',
+          },
+          409,
+          request,
+          env
+        );
+      }
+
+      // Edição de contrato DRAFT
+      const body = (await request.json().catch(() => ({}))) as any;
+      const newName = body.name !== undefined ? String(body.name).trim() : existing.name;
+      const newProp = body.propertyDescription !== undefined ? String(body.propertyDescription).trim() : existing.property_description;
+      const newFinanced = body.financedAmount !== undefined ? Number(body.financedAmount) : existing.financed_amount;
+      const newInstallment = body.fixedInstallment !== undefined ? Number(body.fixedInstallment) : existing.fixed_installment;
+      const newInterest = body.annualInterestRate !== undefined ? Number(body.annualInterestRate) : existing.annual_interest_rate;
+      const newTerm = body.termMonths !== undefined ? Number(body.termMonths) : existing.term_months;
+      const newStart = body.startDate !== undefined ? String(body.startDate).trim() : existing.start_date;
+      const newFine = body.finePercent !== undefined ? Number(body.finePercent) : existing.fine_percent;
+      const newTr = body.trMode !== undefined ? (body.trMode === 'MONTHLY' ? 'MONTHLY' : 'ANNUAL') : existing.tr_mode;
+
+      await env.DB.prepare(`
+        UPDATE contracts SET
+          name = ?,
+          property_description = ?,
+          financed_amount = ?,
+          fixed_installment = ?,
+          annual_interest_rate = ?,
+          term_months = ?,
+          start_date = ?,
+          fine_percent = ?,
+          tr_mode = ?,
+          updated_at = datetime('now')
+        WHERE id = ? AND status = 'DRAFT'
+      `).bind(
+        newName,
+        newProp,
+        newFinanced,
+        newInstallment,
+        newInterest,
+        newTerm,
+        newStart,
+        newFine,
+        newTr,
+        contractId
+      ).run();
+
+      const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+      await logAuditEvent(env.DB, contractId, 'CONTRACT_DRAFT_UPDATED', `Rascunho de contrato atualizado por @${user.login}`, clientIp);
+
+      const updated = await env.DB.prepare('SELECT * FROM contracts WHERE id = ?').bind(contractId).first<any>();
+      return jsonResponse({ ok: true, contract: formatContractDbRow(updated) }, 200, request, env);
+    }
+  }
+
+  return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Endpoint de contratos não encontrado.' }, 404, request, env);
+}
+
+/**
+ * Handle transactions endpoints
+ * Default: FAIL-CLOSED (503) unless ENABLE_D1_PERSISTENCE === 'true'
+ */
+async function handleTransactions(request: Request, env: Env, url: URL): Promise<Response> {
+  const isPersistenceEnabled = env.ENABLE_D1_PERSISTENCE === 'true';
+  if (!isPersistenceEnabled) {
+    return jsonResponse(
+      {
+        ok: false,
+        code: 'D1_PERSISTENCE_NOT_ENABLED',
+        message: 'Persistência D1 ainda não habilitada para produção.',
+      },
+      503,
+      request,
+      env
+    );
+  }
+
+  if (!env.DB) {
+    return jsonResponse({ ok: false, error: 'Database not available' }, 503, request, env);
+  }
+
+  await ensureDatabaseSchema(env.DB);
+
+  let user: SessionUser;
+  try {
+    user = await requireSessionUser(request, env);
+  } catch (_e) {
+    return jsonResponse({ ok: false, code: 'UNAUTHORIZED', message: 'Sessão inválida ou expirada.' }, 401, request, env);
+  }
+
+  // GET /api/v1/transactions?contractId=...
+  if (request.method === 'GET') {
+    const contractId = url.searchParams.get('contractId');
+    if (!contractId) {
+      return jsonResponse({ ok: false, code: 'INVALID_REQUEST', message: 'contractId é obrigatório.' }, 400, request, env);
+    }
+    if (user.role === 'BUYER') {
+      const contract = await env.DB.prepare('SELECT user_id, status FROM contracts WHERE id = ?').bind(contractId).first<any>();
+      if (contract && contract.status !== 'ACTIVE' && contract.user_id && contract.user_id !== user.id) {
+        return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Acesso não autorizado aos lançamentos deste contrato.' }, 403, request, env);
+      }
+    }
+    const { results } = await env.DB.prepare(
+      'SELECT * FROM transactions WHERE contract_id = ? ORDER BY date ASC, installment_number ASC'
+    ).bind(contractId).all<any>();
+    return jsonResponse({ ok: true, transactions: (results || []).map(formatTransactionDbRow) }, 200, request, env);
+  }
+
+  // POST /api/v1/transactions -> Criar novo lançamento (exige contrato ACTIVE)
+  if (request.method === 'POST') {
+    if (user.role !== 'ADMIN' && user.role !== 'SELLER') {
+      return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Apenas Vendedor ou Administrador pode registrar lançamentos.' }, 403, request, env);
+    }
+
+    const body = (await request.json().catch(() => ({}))) as any;
+    const {
+      contractId,
+      date,
+      installmentNumber,
+      amount,
+      type,
+      method,
+      observation,
+      status,
+      receiptKey,
+      receiptFileName,
+      receiptMimeType,
+      receiptBase64,
+    } = body || {};
+
+    if (!contractId || !date || amount === undefined || !installmentNumber || !type) {
+      return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Parâmetros de lançamento incompletos.' }, 400, request, env);
+    }
+
+    const contract = await env.DB.prepare('SELECT id, status FROM contracts WHERE id = ?').bind(contractId).first<any>();
+    if (!contract) {
+      return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Contrato não encontrado.' }, 404, request, env);
+    }
+
+    // Regra Obrigatória J: Novo Lançamento em DRAFT é rejeitado
+    if (contract.status !== 'ACTIVE') {
+      return jsonResponse({
+        ok: false,
+        code: 'CONTRACT_NOT_ACTIVE',
+        message: 'Lançamentos financeiros só são permitidos após a ativação do contrato.',
+      }, 400, request, env);
+    }
+
+    const newTxId = body.id || crypto.randomUUID();
+    const txAmount = Number(amount);
+    const txInstallment = Number(installmentNumber);
+    const txType = type === 'LANCE' ? 'LANCE' : 'PAYMENT';
+    const txMethod = method || 'PIX';
+    const txStatus = status === 'EM_ABERTO' ? 'EM_ABERTO' : 'PAGO';
+    const finalReceiptKey = receiptKey || (receiptBase64 ? String(receiptBase64) : null);
+
+    // Insere transação (NÃO modifica nenhum parâmetro estrutural da tabela contracts!)
+    await env.DB.prepare(`
+      INSERT INTO transactions (
+        id, contract_id, date, installment_number, amount, type, method, observation,
+        status, receipt_key, receipt_file_name, receipt_mime_type, created_by, created_by_email,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `).bind(
+      newTxId,
+      contractId,
+      date,
+      txInstallment,
+      txAmount,
+      txType,
+      txMethod,
+      observation || null,
+      txStatus,
+      finalReceiptKey,
+      receiptFileName || null,
+      receiptMimeType || null,
+      user.login,
+      user.email || null
+    ).run();
+
+    const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+    await logAuditEvent(env.DB, contractId, 'TRANSACTION_CREATED', `Lançamento ${txType} R$ ${txAmount} registrado por @${user.login}`, clientIp);
+
+    const created = await env.DB.prepare('SELECT * FROM transactions WHERE id = ?').bind(newTxId).first<any>();
+    return jsonResponse({ ok: true, transaction: formatTransactionDbRow(created) }, 201, request, env);
+  }
+
+  // DELETE /api/v1/transactions
+  if (request.method === 'DELETE') {
+    if (user.role !== 'ADMIN' && user.role !== 'SELLER') {
+      return jsonResponse({ ok: false, code: 'FORBIDDEN', message: 'Permissão negada.' }, 403, request, env);
+    }
+    const pathParts = url.pathname.split('/').filter(Boolean);
+    const pathTxId = pathParts[3];
+    const txId = url.searchParams.get('id') || pathTxId;
+    if (!txId) {
+      return jsonResponse({ ok: false, code: 'INVALID_REQUEST', message: 'id da transação é obrigatório.' }, 400, request, env);
+    }
+    await env.DB.prepare('DELETE FROM transactions WHERE id = ?').bind(txId).run();
+    return jsonResponse({ ok: true, message: 'Lançamento excluído com sucesso.' }, 200, request, env);
+  }
+
+  return jsonResponse({ ok: false, code: 'NOT_FOUND', message: 'Endpoint não encontrado.' }, 404, request, env);
 }
 
 // ============================================================================

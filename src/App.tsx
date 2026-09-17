@@ -16,7 +16,13 @@ import {
   Eye,
   Paperclip,
   LogOut,
-  Loader2
+  Loader2,
+  Lock,
+  CheckCircle2,
+  AlertCircle,
+  Save,
+  ShieldCheck,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -40,74 +46,7 @@ import { Login } from './components/Login';
 import { AdminBootstrap } from './components/AdminBootstrap';
 import { AdminPanel } from './components/AdminPanel';
 import { SellerPanel } from './components/SellerPanel';
-import { auth, db } from './lib/firebase';
-import { signOut } from 'firebase/auth';
-import { 
-  doc, 
-  onSnapshot, 
-  setDoc, 
-  collection, 
-  query, 
-  orderBy, 
-  addDoc, 
-  deleteDoc,
-  getDoc,
-  serverTimestamp
-} from 'firebase/firestore';
 
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-    providerInfo?: {
-      providerId?: string | null;
-      email?: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: any, operationType: OperationType, path: string | null) {
-  const isPermissionError = error?.code === 'permission-denied' || error?.message?.includes('Missing or insufficient permissions');
-  
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData?.map(provider => ({
-        providerId: provider.providerId,
-        email: provider.email,
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  
-  if (isPermissionError) {
-    alert("Erro de permissão no Firestore. Verifique as regras de segurança.");
-  }
-
-  return new Error(JSON.stringify(errInfo));
-}
 
 const fileToBase64 = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -186,6 +125,13 @@ export default function App() {
   const [isSyncing, setIsSyncing] = React.useState(true);
   const [adminViewingBuyerPortal, setAdminViewingBuyerPortal] = React.useState(false);
 
+  // Etapa 4A: Estados do Ciclo de Vida do Contrato (Rascunho & Ativação)
+  const [isActivationModalOpen, setIsActivationModalOpen] = React.useState(false);
+  const [activationConfirmedCheck, setActivationConfirmedCheck] = React.useState(false);
+  const [isSavingDraft, setIsSavingDraft] = React.useState(false);
+  const [isActivating, setIsActivating] = React.useState(false);
+  const [actionFeedback, setActionFeedback] = React.useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
   // Client-side routing for /admin/bootstrap
   const [currentPath, setCurrentPath] = React.useState<string>(() => {
     if (typeof window !== 'undefined') {
@@ -211,122 +157,114 @@ export default function App() {
     });
   }, []);
 
-  // Firebase Sync: Load contracts list
-  React.useEffect(() => {
+  // D1 Sync: Load contracts list from Cloudflare D1 (Fonte de Verdade)
+  const loadContracts = React.useCallback(async () => {
     if (!user) return;
+    try {
+      const res = await apiService.getContracts();
+      if (res.ok && Array.isArray(res.contracts)) {
+        const list = res.contracts.map((c) => ({
+          id: c.id,
+          name: c.name || c.propertyDescription || `Contrato ${c.id.slice(0, 8)}`,
+        }));
+        setContractsList(list);
 
-    const contractsCol = collection(db, 'contracts');
-    const unsubscribe = onSnapshot(contractsCol, (snapshot) => {
-      const list: { id: string; name: string }[] = [];
-      snapshot.forEach((d) => {
-        const data = d.data();
-        list.push({
-          id: d.id,
-          name: data.name || data.propertyDescription || `Contrato ${d.id.slice(0, 8)}`,
-        });
-      });
-      setContractsList(list);
-
-      if (list.length > 0) {
-        setActiveContractId(prev => {
-          const exists = list.some(c => c.id === prev);
-          const chosen = exists ? prev : list[0].id;
-          localStorage.setItem('active_contract_id', chosen);
-          return chosen;
-        });
+        if (list.length > 0) {
+          setActiveContractId((prev) => {
+            const exists = list.some((c) => c.id === prev);
+            const chosen = exists ? prev : list[0].id;
+            localStorage.setItem('active_contract_id', chosen);
+            return chosen;
+          });
+        } else if (user.role === 'ADMIN' || user.role === 'SELLER') {
+          // Se não existir nenhum contrato no D1, cria contrato inicial em DRAFT
+          const newId = crypto.randomUUID();
+          const initialContract: Partial<ContractConfig> = {
+            id: newId,
+            name: 'Contrato Principal',
+            propertyDescription: '',
+            financedAmount: 0,
+            fixedInstallment: 0,
+            annualInterestRate: 0,
+            termMonths: 0,
+            startDate: format(new Date(), 'yyyy-MM-dd'),
+            finePercent: 0,
+            trMode: 'ANNUAL',
+            status: 'DRAFT',
+          };
+          const createRes = await apiService.createContract(initialContract);
+          if (createRes.ok && createRes.contract) {
+            setContractsList([{ id: createRes.contract.id, name: createRes.contract.name }]);
+            setActiveContractId(createRes.contract.id);
+            localStorage.setItem('active_contract_id', createRes.contract.id);
+            setConfig(createRes.contract);
+          }
+        }
       } else {
-        // Create initial generic contract if none exists
-        const newId = crypto.randomUUID();
-        const initialContract: ContractConfig = {
-          id: newId,
-          name: 'Contrato Principal',
-          propertyDescription: '',
-          financedAmount: 0,
-          fixedInstallment: 0,
-          annualInterestRate: 0,
-          termMonths: 0,
-          startDate: format(new Date(), 'yyyy-MM-dd'),
-          finePercent: 0,
-          trMode: 'ANNUAL',
-          ownerId: user.uid,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        setDoc(doc(db, 'contracts', newId), initialContract).catch((err) => {
-          handleFirestoreError(err, OperationType.CREATE, `contracts/${newId}`);
-        });
-        setActiveContractId(newId);
-        localStorage.setItem('active_contract_id', newId);
+        console.warn("Retorno de contratos do D1 não esperado:", res);
       }
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, 'contracts');
+    } catch (err) {
+      console.error("Erro ao carregar contratos do D1:", err);
+      setError("Falha ao comunicar com banco de dados D1.");
+    } finally {
       setIsSyncing(false);
-    });
-
-    return () => unsubscribe();
+    }
   }, [user]);
 
-  // Firebase Sync: Config for activeContractId
   React.useEffect(() => {
-    if (!user || !activeContractId) {
-      if (!user) setIsSyncing(false);
+    loadContracts();
+  }, [loadContracts]);
+
+  // D1 Sync: Carregar dados do contrato ativo e lançamentos do D1 (Fonte de Verdade)
+  const loadActiveContractData = React.useCallback(async (contractId: string) => {
+    if (!user || !contractId) {
+      setIsSyncing(false);
       return;
     }
 
-    const docRef = doc(db, 'contracts', activeContractId);
-    const unsubscribe = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setConfig(prev => ({
-          ...prev,
-          id: activeContractId,
-          name: data.name || prev.name || 'Contrato de Imóvel',
-          propertyDescription: data.propertyDescription || '',
-          financedAmount: safeNumber(data.financedAmount),
-          fixedInstallment: safeNumber(data.fixedInstallment),
-          annualInterestRate: safeNumber(data.annualInterestRate),
-          termMonths: safeNumber(data.termMonths),
-          startDate: data.startDate || prev.startDate,
-          finePercent: safeNumber(data.finePercent),
-          trMode: data.trMode || prev.trMode || 'ANNUAL',
-          ownerId: data.ownerId,
-        }));
+    try {
+      // 1. Carrega dados estruturais e status do D1
+      const contractRes = await apiService.getContract(contractId);
+      if (contractRes.ok && contractRes.contract) {
+        const c = contractRes.contract;
+        setConfig({
+          id: c.id,
+          name: c.name || 'Contrato Principal',
+          propertyDescription: c.propertyDescription || '',
+          financedAmount: safeNumber(c.financedAmount),
+          fixedInstallment: safeNumber(c.fixedInstallment),
+          annualInterestRate: safeNumber(c.annualInterestRate),
+          termMonths: safeNumber(c.termMonths),
+          startDate: c.startDate || format(new Date(), 'yyyy-MM-dd'),
+          finePercent: safeNumber(c.finePercent),
+          trMode: c.trMode || 'ANNUAL',
+          status: c.status || 'DRAFT',
+          activatedAt: c.activatedAt || null,
+          activatedBy: c.activatedBy || null,
+          ownerId: c.ownerId,
+        });
+        // Cache não autoritativo no localStorage
+        localStorage.setItem(`venda_ap_contract_${contractId}`, JSON.stringify(c));
       }
-      setIsSyncing(false);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.GET, `contracts/${activeContractId}`);
-      setError("Erro ao carregar dados do contrato selecionado.");
-      setIsSyncing(false);
-    });
 
-    return () => unsubscribe();
-  }, [user, activeContractId]);
+      // 2. Carrega lançamentos do D1
+      const txRes = await apiService.getTransactions(contractId);
+      if (txRes.ok && Array.isArray(txRes.transactions)) {
+        setTransactions(txRes.transactions);
+      }
+    } catch (err) {
+      console.error("Erro ao carregar dados do contrato do D1:", err);
+      setError("Falha ao sincronizar dados do contrato.");
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [user]);
 
-  // Firebase Sync: Transactions for activeContractId
   React.useEffect(() => {
-    if (!user || !activeContractId) return;
-
-    const q = query(
-      collection(db, 'contracts', activeContractId, 'transactions'),
-      orderBy('createdAt', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(q, (querySnapshot) => {
-      const txs: Transaction[] = [];
-      querySnapshot.forEach((doc) => {
-        const data = doc.data();
-        if (data.createdAt && typeof data.createdAt.toDate === 'function') {
-          data.createdAt = data.createdAt.toDate().toISOString();
-        }
-        txs.push({ id: doc.id, contractId: activeContractId, ...data } as any);
-      });
-      setTransactions(txs);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, `contracts/${activeContractId}/transactions`);
-    });
-
-    return () => unsubscribe();
-  }, [user, activeContractId]);
+    if (activeContractId) {
+      loadActiveContractData(activeContractId);
+    }
+  }, [activeContractId, loadActiveContractData]);
 
   // Global error listener for debug
   React.useEffect(() => {
@@ -422,20 +360,22 @@ export default function App() {
       return;
     }
 
-    console.log("Confirmando lançamento", { newTx, file });
-    console.log("Arquivo no submit:", file);
-    console.log("Usuário atual", user.email, user.uid);
-    console.log("Contrato ativo:", activeContractId);
+    // Regra J: Novo Lançamento permitido somente com contrato ACTIVE
+    if (config.status !== 'ACTIVE') {
+      setActionFeedback({
+        type: 'error',
+        message: 'Lançamentos financeiros só são permitidos após a ativação do contrato.',
+      });
+      alert("Atenção: O contrato ainda está em Rascunho (DRAFT). Salve e ative o contrato antes de registrar lançamentos.");
+      return;
+    }
 
     try {
-      let receiptBase64 = null;
-      let receiptMimeType = null;
-      let receiptFileName = null;
+      let receiptBase64: string | null = null;
+      let receiptMimeType: string | null = null;
+      let receiptFileName: string | null = null;
 
       if (file) {
-        console.log("Iniciando conversão do arquivo para base64");
-        console.log("Arquivo:", file.name, file.size, file.type);
-
         if (file.size > 1024 * 1024) {
           alert("O arquivo é muito grande (máximo 1MB). Por favor, use um arquivo menor.");
           throw new Error("FILE_TOO_LARGE");
@@ -445,7 +385,6 @@ export default function App() {
           receiptBase64 = await fileToBase64(file);
           receiptMimeType = file.type;
           receiptFileName = file.name;
-          console.log("Conversão concluída com sucesso");
         } catch (convErr) {
           console.error("Erro na conversão:", convErr);
           alert("Erro ao processar arquivo. O pagamento não foi salvo.");
@@ -453,49 +392,205 @@ export default function App() {
         }
       }
 
-      await addDoc(collection(db, 'contracts', activeContractId, 'transactions'), {
+      // Persistência autoritativa real no Cloudflare D1
+      const res = await apiService.createTransaction({
         contractId: activeContractId,
         date: newTx.date || format(new Date(), 'yyyy-MM-dd'),
         installmentNumber: safeNumber(newTx.installmentNumber),
         amount: safeNumber(newTx.amount),
         type: newTx.type || 'PAYMENT',
         method: newTx.method || 'PIX',
-        receiptBase64,
-        receiptMimeType,
-        receiptFileName,
-        createdAt: serverTimestamp(),
-        createdBy: user.uid,
-        createdByEmail: user.email || null,
-        status: 'PAGO'
+        observation: newTx.observation || '',
+        status: 'PAGO',
+        receiptBase64: receiptBase64 || undefined,
+        receiptFileName: receiptFileName || undefined,
+        receiptMimeType: receiptMimeType || undefined,
       });
 
-      console.log("Lançamento salvo no Firestore com sucesso!");
-      alert("Lançamento registrado com sucesso");
+      if (!res.ok) {
+        const msg = res.message || 'Falha ao persistir lançamento no D1.';
+        setActionFeedback({ type: 'error', message: msg });
+        alert(msg);
+        return;
+      }
+
+      // Recarrega do D1 para recalcular a amortização e dashboard
+      await loadActiveContractData(activeContractId);
+
+      setActionFeedback({
+        type: 'success',
+        message: 'Lançamento persistido no D1 com sucesso!',
+      });
+      alert("Lançamento registrado com sucesso no D1!");
     } catch (err: any) {
       if (err.message === "FILE_TOO_LARGE") return;
-      
-      console.error("Erro ao salvar lançamento:", err);
-      const errorMessage = err?.code ? `${err.code} - ${err.message}` : err.message;
+      console.error("Erro ao salvar lançamento no D1:", err);
+      const errorMessage = err?.message || String(err);
       setError(errorMessage);
-
-      if (err?.code === 'permission-denied') {
-        alert("Erro de permissão no Firestore. Verifique as regras de segurança.");
-      }
-      handleFirestoreError(err, OperationType.CREATE, `contracts/${activeContractId}/transactions`);
+      alert("Erro ao persistir lançamento no D1: " + errorMessage);
     }
   };
 
   const handleUpdateConfig = async (newConfig: Partial<ContractConfig>) => {
     if (!user || !activeContractId) return;
+
+    // Se o contrato já estiver ACTIVE, bloqueia qualquer tentativa de alteração dos parâmetros estruturais!
+    if (config.status === 'ACTIVE') {
+      setActionFeedback({
+        type: 'error',
+        message: 'Contrato ativo. Parâmetros contratuais estão bloqueados e não podem ser alterados.',
+      });
+      return;
+    }
+
+    const updated: ContractConfig = {
+      ...config,
+      ...newConfig,
+      updatedAt: new Date().toISOString(),
+    };
+    setConfig(updated);
+
+    // Salva rascunho local de forma síncrona/imediata como cache de UX
     try {
-      await setDoc(doc(db, 'contracts', activeContractId), {
-        ...config,
-        ...newConfig,
-        ownerId: user.uid,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
+      localStorage.setItem(`venda_ap_contract_${activeContractId}`, JSON.stringify(updated));
+    } catch (_e) {}
+
+    // Sincroniza diretamente com o Cloudflare D1 (Fonte de Verdade)
+    try {
+      const res = await apiService.updateContract(activeContractId, updated);
+      if (!res.ok) {
+        console.warn("D1 Update notice:", res.message);
+      }
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `contracts/${activeContractId}`);
+      console.error("Erro ao atualizar contrato no D1:", err);
+    }
+  };
+
+  const handleSaveDraft = async () => {
+    if (!user || !activeContractId) return;
+    if (config.status === 'ACTIVE') {
+      setActionFeedback({
+        type: 'error',
+        message: 'Contrato já ativado. Parâmetros contratuais estão bloqueados.',
+      });
+      return;
+    }
+
+    setIsSavingDraft(true);
+    try {
+      const draftData: ContractConfig = {
+        ...config,
+        status: 'DRAFT',
+        updatedAt: new Date().toISOString(),
+      };
+
+      // Persistência real autoritativa no D1
+      const res = await apiService.updateContract(activeContractId, draftData);
+      if (res.ok && res.contract) {
+        setConfig(res.contract);
+        localStorage.setItem(`venda_ap_contract_${activeContractId}`, JSON.stringify(res.contract));
+      } else {
+        localStorage.setItem(`venda_ap_contract_${activeContractId}`, JSON.stringify(draftData));
+      }
+
+      setActionFeedback({
+        type: 'success',
+        message: 'Rascunho do contrato salvo com sucesso no banco de dados D1!',
+      });
+    } catch (err) {
+      console.error("Erro ao salvar rascunho no D1:", err);
+      setActionFeedback({
+        type: 'error',
+        message: 'Falha ao salvar rascunho no D1. Verifique a conexão.',
+      });
+    } finally {
+      setIsSavingDraft(false);
+    }
+  };
+
+  const handleOpenActivationModal = () => {
+    if (config.status === 'ACTIVE') {
+      setActionFeedback({
+        type: 'error',
+        message: 'Este contrato já se encontra ativo e com parâmetros bloqueados.',
+      });
+      return;
+    }
+
+    const financed = safeNumber(config.financedAmount);
+    const installment = safeNumber(config.fixedInstallment);
+    const term = safeNumber(config.termMonths);
+    const interest = safeNumber(config.annualInterestRate);
+    const fine = safeNumber(config.finePercent);
+    const start = config.startDate;
+    const nameVal = config.name;
+
+    if (!nameVal || !nameVal.trim()) {
+      setActionFeedback({ type: 'error', message: 'O nome ou identificação do contrato é obrigatório.' });
+      return;
+    }
+    if (financed <= 0) {
+      setActionFeedback({ type: 'error', message: 'O valor financiado deve ser maior que zero (R$ > 0).' });
+      return;
+    }
+    if (installment <= 0) {
+      setActionFeedback({ type: 'error', message: 'O valor da parcela base deve ser maior que zero (R$ > 0).' });
+      return;
+    }
+    if (term <= 0 || !Number.isInteger(term)) {
+      setActionFeedback({ type: 'error', message: 'O prazo contratual deve ser de no mínimo 1 mês inteiro.' });
+      return;
+    }
+    if (!start || !start.trim()) {
+      setActionFeedback({ type: 'error', message: 'A data inicial do contrato é obrigatória.' });
+      return;
+    }
+    if (interest < 0) {
+      setActionFeedback({ type: 'error', message: 'A taxa de juros anual não pode ser negativa.' });
+      return;
+    }
+    if (fine < 0) {
+      setActionFeedback({ type: 'error', message: 'O percentual de multa não pode ser negativo.' });
+      return;
+    }
+
+    setActivationConfirmedCheck(false);
+    setIsActivationModalOpen(true);
+  };
+
+  const handleConfirmActivation = async () => {
+    if (!activationConfirmedCheck) return;
+    if (!user || !activeContractId) return;
+
+    setIsActivating(true);
+    try {
+      // 1. Executa ativação atômica real no Cloudflare D1
+      const res = await apiService.activateContract(activeContractId);
+      if (!res.ok || !res.contract) {
+        throw new Error(res.message || 'Falha na ativação do contrato no D1.');
+      }
+
+      const activatedContract = res.contract;
+
+      // 2. Atualiza estado em tela com os dados retornados pelo D1
+      setConfig(activatedContract);
+
+      // 3. Atualiza cache local não autoritativo
+      localStorage.setItem(`venda_ap_contract_${activeContractId}`, JSON.stringify(activatedContract));
+
+      setIsActivationModalOpen(false);
+      setActionFeedback({
+        type: 'success',
+        message: 'Contrato ativado com sucesso no D1! Parâmetros contratuais bloqueados para edição.',
+      });
+    } catch (err: any) {
+      console.error("Erro ao ativar contrato no D1:", err);
+      setActionFeedback({
+        type: 'error',
+        message: err.message || 'Erro ao ativar o contrato no D1. Tente novamente.',
+      });
+    } finally {
+      setIsActivating(false);
     }
   };
 
@@ -505,7 +600,7 @@ export default function App() {
     if (!name || !name.trim()) return;
 
     const newId = crypto.randomUUID();
-    const newContract: ContractConfig = {
+    const newContract: Partial<ContractConfig> = {
       id: newId,
       name: name.trim(),
       propertyDescription: '',
@@ -516,17 +611,22 @@ export default function App() {
       startDate: format(new Date(), 'yyyy-MM-dd'),
       finePercent: 0,
       trMode: 'ANNUAL',
-      ownerId: user.uid,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      status: 'DRAFT',
     };
 
     try {
-      await setDoc(doc(db, 'contracts', newId), newContract);
-      setActiveContractId(newId);
-      localStorage.setItem('active_contract_id', newId);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `contracts/${newId}`);
+      const res = await apiService.createContract(newContract);
+      if (res.ok && res.contract) {
+        setContractsList((prev) => [...prev, { id: res.contract!.id, name: res.contract!.name }]);
+        setActiveContractId(res.contract.id);
+        setConfig(res.contract);
+        localStorage.setItem('active_contract_id', res.contract.id);
+      } else {
+        alert(res.message || "Erro ao criar contrato no D1.");
+      }
+    } catch (err: any) {
+      console.error("Erro ao criar contrato no D1:", err);
+      alert("Erro ao criar contrato no D1: " + err.message);
     }
   };
 
@@ -534,9 +634,15 @@ export default function App() {
     if (!user || !activeContractId) return;
     if (!confirm("Deseja realmente excluir este lançamento?")) return;
     try {
-      await deleteDoc(doc(db, 'contracts', activeContractId, 'transactions', id));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `contracts/${activeContractId}/transactions/${id}`);
+      const res = await apiService.deleteTransaction(id, activeContractId);
+      if (res.ok) {
+        await loadActiveContractData(activeContractId);
+      } else {
+        alert(res.message || "Erro ao excluir lançamento.");
+      }
+    } catch (err: any) {
+      console.error("Erro ao excluir lançamento no D1:", err);
+      alert("Erro ao excluir lançamento: " + err.message);
     }
   };
 
@@ -585,15 +691,7 @@ export default function App() {
     );
   }
 
-  // Papel: SELLER -> Painel do Vendedor
-  if (user.role === 'SELLER') {
-    return (
-      <SellerPanel 
-        currentUser={user} 
-        onLogout={logout} 
-      />
-    );
-  }
+  const isLocked = config.status === 'ACTIVE' || user.role === 'BUYER';
 
   return (
     <div className="min-h-screen bg-slate-50 flex text-slate-900 font-sans">
@@ -648,19 +746,55 @@ export default function App() {
             )}
           </div>
 
+          {/* Status do Contrato (Etapa 4A) */}
+          {config.status === 'ACTIVE' ? (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+                <Lock size={16} />
+              </div>
+              <div>
+                <span className="text-xs font-black text-emerald-950 uppercase tracking-wide">CONTRATO ATIVO</span>
+                <p className="text-[11px] text-emerald-700 font-medium">🔒 Parâmetros bloqueados</p>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                <div>
+                  <span className="text-xs font-black text-amber-950 uppercase tracking-wide">RASCUNHO (DRAFT)</span>
+                  <p className="text-[11px] text-amber-700">Edição permitida pelo Vendedor</p>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 text-slate-500 mb-2">
             <Settings2 size={16} />
             <h2 className="text-sm font-semibold uppercase tracking-wider">Parâmetros do Contrato</h2>
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-tight">Nome / Identificação</label>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-tight">Nome / Identificação</label>
+              {isLocked && (
+                <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1 uppercase tracking-wider">
+                  <Lock size={10} /> Bloqueado
+                </span>
+              )}
+            </div>
             <input 
               type="text" 
               value={config.name || ''}
               onChange={e => handleUpdateConfig({ name: e.target.value })}
+              disabled={isLocked}
               placeholder="Ex: Apartamento 402"
-              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-semibold"
+              className={cn(
+                "w-full border rounded-lg px-4 py-2.5 text-sm outline-none transition-all font-semibold",
+                isLocked 
+                  ? "bg-slate-100/90 border-slate-200 text-slate-500 cursor-not-allowed select-none" 
+                  : "bg-slate-50 border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-900"
+              )}
             />
           </div>
 
@@ -670,6 +804,7 @@ export default function App() {
             onChange={v => handleUpdateConfig({ financedAmount: v })} 
             icon={<DollarSign size={16} />}
             isCurrency
+            disabled={isLocked}
           />
 
           <ConfigInput 
@@ -678,6 +813,7 @@ export default function App() {
             onChange={v => handleUpdateConfig({ fixedInstallment: v })} 
             icon={<Target size={16} />}
             isCurrency
+            disabled={isLocked}
           />
 
           <div className="grid grid-cols-2 gap-4">
@@ -687,12 +823,14 @@ export default function App() {
               onChange={v => handleUpdateConfig({ annualInterestRate: v })} 
               icon={<Percent size={16} />}
               suffix="%"
+              disabled={isLocked}
             />
             <ConfigInput 
               label="Multa" 
               value={config.finePercent} 
               onChange={v => handleUpdateConfig({ finePercent: v })} 
               suffix="%"
+              disabled={isLocked}
             />
           </div>
 
@@ -701,15 +839,29 @@ export default function App() {
             value={config.termMonths} 
             onChange={v => handleUpdateConfig({ termMonths: v })} 
             suffix="Meses"
+            disabled={isLocked}
           />
 
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-500 uppercase">Data de Início</label>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-slate-500 uppercase">Data de Início</label>
+              {isLocked && (
+                <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1 uppercase tracking-wider">
+                  <Lock size={10} /> Bloqueado
+                </span>
+              )}
+            </div>
             <input 
               type="date" 
               value={config.startDate}
               onChange={e => handleUpdateConfig({ startDate: e.target.value })}
-              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium"
+              disabled={isLocked}
+              className={cn(
+                "w-full border rounded-lg px-4 py-2.5 text-sm outline-none transition-all font-medium",
+                isLocked 
+                  ? "bg-slate-100/90 border-slate-200 text-slate-500 cursor-not-allowed select-none" 
+                  : "bg-slate-50 border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-900"
+              )}
             />
           </div>
 
@@ -717,25 +869,60 @@ export default function App() {
             <label className="text-xs font-semibold text-slate-500 uppercase">Modo de TR</label>
             <div className="flex p-1 bg-slate-100 rounded-xl border border-slate-200">
               <button 
+                type="button"
+                disabled={isLocked}
                 onClick={() => handleUpdateConfig({ trMode: 'MONTHLY' })}
                 className={cn(
                   "flex-1 py-1.5 text-[10px] font-bold rounded-lg transition-all",
-                  config.trMode === 'MONTHLY' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                  config.trMode === 'MONTHLY' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700",
+                  isLocked && "cursor-not-allowed opacity-80"
                 )}
               >
                 TR MENSAL
               </button>
               <button 
+                type="button"
+                disabled={isLocked}
                 onClick={() => handleUpdateConfig({ trMode: 'ANNUAL' })}
                 className={cn(
                   "flex-1 py-1.5 text-[10px] font-bold rounded-lg transition-all",
-                  config.trMode === 'ANNUAL' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                  config.trMode === 'ANNUAL' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700",
+                  isLocked && "cursor-not-allowed opacity-80"
                 )}
               >
                 TR ANUAL
               </button>
             </div>
           </div>
+
+          {/* Ações do Ciclo de Vida: Salvar Rascunho & Salvar e Ativar */}
+          {!isLocked && user.role !== 'BUYER' ? (
+            <div className="space-y-2 pt-2">
+              <button
+                type="button"
+                onClick={handleSaveDraft}
+                disabled={isSavingDraft}
+                className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm hover:border-slate-400"
+              >
+                <Save size={14} className={isSavingDraft ? "animate-spin text-indigo-600" : "text-slate-500"} />
+                <span>{isSavingDraft ? "Salvando..." : "SALVAR RASCUNHO"}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleOpenActivationModal}
+                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm shadow-emerald-600/20"
+              >
+                <ShieldCheck size={14} />
+                <span>SALVAR E ATIVAR CONTRATO</span>
+              </button>
+            </div>
+          ) : config.status === 'ACTIVE' ? (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-center text-xs text-slate-500">
+              <span className="font-semibold text-slate-700">Operação em Andamento:</span>
+              <p className="text-[11px] mt-0.5">Parâmetros bloqueados. Utilize <strong className="text-indigo-600">+ Novo Lançamento</strong> para pagamentos e amortizações.</p>
+            </div>
+          ) : null}
 
           <div className="pt-6 border-t border-slate-100">
             <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100">
@@ -798,16 +985,50 @@ export default function App() {
             )}
 
             <button 
-              onClick={() => setActiveTab('transactions')}
-              className="flex items-center gap-2 bg-indigo-600 text-white px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm cursor-pointer"
+              onClick={() => {
+                if (config.status !== 'ACTIVE') {
+                  setActionFeedback({
+                    type: 'error',
+                    message: 'Lançamentos financeiros só são permitidos após a ativação do contrato.',
+                  });
+                  return;
+                }
+                setActiveTab('transactions');
+              }}
+              title={config.status !== 'ACTIVE' ? "O contrato precisa ser ativado antes de novos lançamentos" : "Novo Lançamento"}
+              className={cn(
+                "flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all shadow-sm cursor-pointer",
+                config.status === 'ACTIVE'
+                  ? "bg-indigo-600 text-white hover:bg-indigo-700"
+                  : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+              )}
             >
               <Plus size={16} />
               <span className="hidden sm:inline">Novo Lançamento</span>
             </button>
 
-            <div className="hidden sm:flex flex-col text-right pl-3 border-l border-slate-200">
-              <span className="text-xs font-bold text-slate-800 leading-tight">{user.name}</span>
-              <span className="text-[10px] text-slate-400 font-mono">@{user.login}</span>
+            <div className="hidden sm:flex items-center gap-2 pl-3 border-l border-slate-200">
+              <div className="text-right">
+                <div className="flex items-center justify-end gap-1.5">
+                  <span className="text-xs font-bold text-slate-800 leading-tight">{user.name}</span>
+                  {user.role === 'SELLER' && (
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                      Vendedor
+                    </span>
+                  )}
+                  {user.role === 'ADMIN' && (
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
+                      Admin
+                    </span>
+                  )}
+                  {user.role === 'BUYER' && (
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      Comprador
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono">@{user.login}</span>
+              </div>
             </div>
 
             <button 
@@ -1216,6 +1437,157 @@ export default function App() {
         </div>
       </main>
       
+      {/* Toast Feedback */}
+      <AnimatePresence>
+        {actionFeedback && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="fixed bottom-6 right-6 z-50 max-w-md shadow-2xl rounded-2xl overflow-hidden border"
+          >
+            <div className={cn(
+              "px-5 py-4 flex items-start gap-3.5",
+              actionFeedback.type === 'success' 
+                ? "bg-emerald-900 text-white border-emerald-700" 
+                : "bg-rose-900 text-white border-rose-700"
+            )}>
+              {actionFeedback.type === 'success' ? (
+                <ShieldCheck size={20} className="text-emerald-300 shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle size={20} className="text-rose-300 shrink-0 mt-0.5" />
+              )}
+              <div className="flex-1 text-sm font-medium leading-snug">
+                {actionFeedback.message}
+              </div>
+              <button 
+                onClick={() => setActionFeedback(null)}
+                className="text-white/70 hover:text-white transition-colors cursor-pointer text-xs font-bold uppercase tracking-wider"
+              >
+                ✕
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Modal de Confirmação de Ativação do Contrato (Etapa 4A) */}
+      <AnimatePresence>
+        {isActivationModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-3xl shadow-2xl border border-slate-200 max-w-lg w-full overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-6 bg-gradient-to-r from-emerald-600 to-teal-700 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
+                    <ShieldCheck size={22} className="text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold">Salvar e Ativar Contrato</h2>
+                    <p className="text-xs text-emerald-100">Transição definitiva de Rascunho para Produção</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsActivationModalOpen(false)}
+                  disabled={isActivating}
+                  className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-5">
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex gap-3 text-amber-900">
+                  <AlertTriangle size={20} className="text-amber-600 shrink-0 mt-0.5" />
+                  <div className="text-xs leading-relaxed">
+                    <strong className="font-bold">Atenção Crítica:</strong> Ao ativar o contrato, seus parâmetros estruturais ficarão <span className="font-bold underline">bloqueados para alteração</span>. A operação seguinte será realizada exclusivamente por meio de <strong>Novos Lançamentos</strong>.
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Conferência dos Parâmetros Reais</h3>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Identificação</span>
+                      <span className="font-bold text-slate-800 text-sm truncate block">{config.name || 'Sem nome'}</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Valor Financiado</span>
+                      <span className="font-bold text-slate-800 text-sm block">{formatCurrency(config.financedAmount)}</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Parcela Base</span>
+                      <span className="font-bold text-slate-800 text-sm block">{formatCurrency(config.fixedInstallment)}</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Prazo Contratual</span>
+                      <span className="font-bold text-slate-800 text-sm block">{config.termMonths} meses</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Juros Anual</span>
+                      <span className="font-bold text-slate-800 block">{config.annualInterestRate}% a.a.</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Multa</span>
+                      <span className="font-bold text-slate-800 block">{config.finePercent}%</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Data de Início</span>
+                      <span className="font-bold text-slate-800 block">{config.startDate}</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Modo TR</span>
+                      <span className="font-bold text-slate-800 block">{config.trMode === 'ANNUAL' ? 'Anual' : 'Mensal'}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <label className="flex items-start gap-3 p-3.5 rounded-2xl bg-slate-100 border border-slate-200 cursor-pointer select-none hover:bg-slate-200/70 transition-colors">
+                  <input 
+                    type="checkbox" 
+                    checked={activationConfirmedCheck}
+                    onChange={e => setActivationConfirmedCheck(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500 cursor-pointer"
+                  />
+                  <span className="text-xs text-slate-700 font-medium leading-relaxed">
+                    Confirmo que conferi todos os dados financeiros acima e autorizo a ativação deste contrato em produção com bloqueio dos parâmetros estruturais.
+                  </span>
+                </label>
+              </div>
+
+              <div className="p-6 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsActivationModalOpen(false)}
+                  disabled={isActivating}
+                  className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:text-slate-800 transition-colors cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmActivation}
+                  disabled={!activationConfirmedCheck || isActivating}
+                  className={cn(
+                    "px-5 py-2.5 rounded-xl text-xs font-bold text-white flex items-center gap-2 transition-all shadow-sm cursor-pointer",
+                    (!activationConfirmedCheck || isActivating)
+                      ? "bg-slate-300 cursor-not-allowed"
+                      : "bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 shadow-emerald-600/20"
+                  )}
+                >
+                  <ShieldCheck size={16} />
+                  <span>{isActivating ? "Ativando Contrato..." : "Confirmar e Ativar Contrato"}</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      
       <AnimatePresence>
         {viewingAttachment && (
           <AttachmentViewer 
@@ -1321,7 +1693,7 @@ function ReadOnlyDisplay({ label, value, icon }: { label: string; value: string 
   );
 }
 
-function ConfigInput({ label, value, onChange, icon, prefix, suffix, isCurrency }: { 
+function ConfigInput({ label, value, onChange, icon, prefix, suffix, isCurrency, disabled }: { 
   label: string; 
   value: number; 
   onChange: (v: number) => void; 
@@ -1329,10 +1701,12 @@ function ConfigInput({ label, value, onChange, icon, prefix, suffix, isCurrency 
   prefix?: string;
   suffix?: string;
   isCurrency?: boolean;
+  disabled?: boolean;
 }) {
   const displayValue = isCurrency ? formatCurrencyInput(value) : value;
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (disabled) return;
     if (isCurrency) {
       onChange(parseCurrencyBR(e.target.value));
     } else {
@@ -1342,10 +1716,20 @@ function ConfigInput({ label, value, onChange, icon, prefix, suffix, isCurrency 
 
   return (
     <div className="space-y-1.5">
-      <label className="text-xs font-semibold text-slate-500 uppercase tracking-tight">{label}</label>
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-semibold text-slate-500 uppercase tracking-tight">{label}</label>
+        {disabled && (
+          <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1 uppercase tracking-wider">
+            <Lock size={10} /> Bloqueado
+          </span>
+        )}
+      </div>
       <div className="relative group">
         {icon && (
-          <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-indigo-500 transition-colors">
+          <div className={cn(
+            "absolute left-3.5 top-1/2 -translate-y-1/2 transition-colors",
+            disabled ? "text-slate-300" : "text-slate-300 group-focus-within:text-indigo-500"
+          )}>
             {icon}
           </div>
         )}
@@ -1353,8 +1737,12 @@ function ConfigInput({ label, value, onChange, icon, prefix, suffix, isCurrency 
           type={isCurrency ? "text" : "number"} 
           value={displayValue}
           onChange={handleChange}
+          disabled={disabled}
           className={cn(
-            "w-full bg-slate-50 border border-slate-200 rounded-lg py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-semibold",
+            "w-full border rounded-lg py-2.5 text-sm outline-none transition-all font-semibold",
+            disabled 
+              ? "bg-slate-100/90 border-slate-200 text-slate-500 cursor-not-allowed select-none" 
+              : "bg-slate-50 border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-900",
             icon ? "pl-10 pr-4" : "px-4"
           )}
         />

@@ -22,6 +22,10 @@ export interface ApiResponse<T = any> {
   message?: string;
   user?: CloudflareUser;
   users?: any[];
+  contract?: ContractConfig;
+  contracts?: ContractConfig[];
+  transaction?: Transaction;
+  transactions?: Transaction[];
 }
 
 export interface AuthMeResponse {
@@ -231,11 +235,11 @@ class ApiService {
   }
 
   async getContract(id: string): Promise<ApiResponse<ContractConfig>> {
-    const res = await fetch(`${this.baseUrl}/contracts/${id}`, { credentials: 'include' });
+    const res = await fetch(`${this.baseUrl}/contracts/${encodeURIComponent(id)}`, { credentials: 'include' });
     return res.json();
   }
 
-  async createContract(contract: Partial<ContractConfig>): Promise<ApiResponse> {
+  async createContract(contract: Partial<ContractConfig>): Promise<ApiResponse<ContractConfig>> {
     const res = await fetch(`${this.baseUrl}/contracts`, {
       method: 'POST',
       credentials: 'include',
@@ -245,12 +249,21 @@ class ApiService {
     return res.json();
   }
 
-  async updateContract(id: string, contract: Partial<ContractConfig>): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl}/contracts/${id}`, {
+  async updateContract(id: string, contract: Partial<ContractConfig>): Promise<ApiResponse<ContractConfig>> {
+    const res = await fetch(`${this.baseUrl}/contracts/${encodeURIComponent(id)}`, {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(contract),
+    });
+    return res.json();
+  }
+
+  async activateContract(id: string): Promise<ApiResponse<ContractConfig>> {
+    const res = await fetch(`${this.baseUrl}/contracts/${encodeURIComponent(id)}/activate`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
     });
     return res.json();
   }

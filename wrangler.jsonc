@@ -18,7 +18,10 @@
       "database_name": "venda-apartamentos-db",
       "database_id": "9c9d38a5-d1ad-40ea-9ee5-a45f3c2696a7"
     }
-  ]
+  ],
+  "vars": {
+    "ENABLE_D1_PERSISTENCE": "true"
+  }
   // R2 Bucket binding prepared for future receipts storage:
   // "r2_buckets": [
   //   {

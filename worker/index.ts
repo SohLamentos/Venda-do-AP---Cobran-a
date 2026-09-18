@@ -1853,6 +1853,248 @@ async function handleContracts(request: Request, env: Env, url: URL): Promise<Re
       );
     }
 
+    // POST /api/v1/contracts/:id/admin-override -> EDIÇÃO EXCEPCIONAL EXCLUSIVA DE ADMIN (ATÔMICA)
+    if (subAction === 'admin-override' && request.method === 'POST') {
+      if (user.role !== 'ADMIN') {
+        return jsonResponse(
+          { ok: false, code: 'FORBIDDEN', message: 'Apenas Administradores têm permissão para edição excepcional de contratos.' },
+          403,
+          request,
+          env
+        );
+      }
+
+      const body = (await request.json().catch(() => ({}))) as any;
+
+      // Validação de payload não-vazio
+      if (!body || typeof body !== 'object' || Object.keys(body).length === 0) {
+        return jsonResponse(
+          { ok: false, code: 'INVALID_PAYLOAD', message: 'Payload da requisição não pode ser vazio.' },
+          400,
+          request,
+          env
+        );
+      }
+
+      // Validação estrita de campos permitidos
+      const allowedKeys = new Set([
+        'name',
+        'propertyDescription',
+        'financedAmount',
+        'fixedInstallment',
+        'annualInterestRate',
+        'termMonths',
+        'startDate',
+        'finePercent',
+        'trMode',
+        'reason',
+      ]);
+      const invalidKeys = Object.keys(body).filter((k) => !allowedKeys.has(k));
+      if (invalidKeys.length > 0) {
+        return jsonResponse(
+          {
+            ok: false,
+            code: 'INVALID_FIELD',
+            message: `Campo(s) não permitido(s) para alteração administrativa: ${invalidKeys.join(', ')}`,
+          },
+          400,
+          request,
+          env
+        );
+      }
+
+      // Validação obrigatória da justificativa no backend (mínimo 10 caracteres, sem fallback)
+      const rawReason = body.reason;
+      if (typeof rawReason !== 'string' || rawReason.trim().length < 10) {
+        return jsonResponse(
+          {
+            ok: false,
+            code: 'ADMIN_OVERRIDE_REASON_REQUIRED',
+            message: 'A justificativa é obrigatória (mínimo de 10 caracteres) para a operação excepcional de ADMIN.',
+          },
+          400,
+          request,
+          env
+        );
+      }
+      const reason = rawReason.trim();
+
+      // Validação semântica dos tipos dos campos enviados
+      if (body.financedAmount !== undefined) {
+        const val = Number(body.financedAmount);
+        if (isNaN(val) || val <= 0) {
+          return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Valor financiado deve ser maior que zero.' }, 400, request, env);
+        }
+      }
+      if (body.fixedInstallment !== undefined) {
+        const val = Number(body.fixedInstallment);
+        if (isNaN(val) || val <= 0) {
+          return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Parcela fixa deve ser maior que zero.' }, 400, request, env);
+        }
+      }
+      if (body.annualInterestRate !== undefined) {
+        const val = Number(body.annualInterestRate);
+        if (isNaN(val) || val < 0) {
+          return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Taxa de juros anual não pode ser negativa.' }, 400, request, env);
+        }
+      }
+      if (body.termMonths !== undefined) {
+        const val = Number(body.termMonths);
+        if (isNaN(val) || val <= 0 || !Number.isInteger(val)) {
+          return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Prazo em meses deve ser um número inteiro maior que zero.' }, 400, request, env);
+        }
+      }
+      if (body.finePercent !== undefined) {
+        const val = Number(body.finePercent);
+        if (isNaN(val) || val < 0) {
+          return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Multa não pode ser negativa.' }, 400, request, env);
+        }
+      }
+      if (body.trMode !== undefined && body.trMode !== 'ANNUAL' && body.trMode !== 'MONTHLY') {
+        return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Regime da TR deve ser ANNUAL ou MONTHLY.' }, 400, request, env);
+      }
+      if (body.startDate !== undefined) {
+        const val = String(body.startDate).trim();
+        if (!val || val.length < 10) {
+          return jsonResponse({ ok: false, code: 'INVALID_PARAMETERS', message: 'Data inicial inválida.' }, 400, request, env);
+        }
+      }
+
+      const updatedFields: { field: string; oldValue: any; newValue: any }[] = [];
+
+      const newName = body.name !== undefined ? String(body.name).trim() : existing.name;
+      if (newName !== existing.name) updatedFields.push({ field: 'name', oldValue: existing.name, newValue: newName });
+
+      const newProp = body.propertyDescription !== undefined ? String(body.propertyDescription).trim() : existing.property_description;
+      if (newProp !== (existing.property_description || '')) updatedFields.push({ field: 'propertyDescription', oldValue: existing.property_description, newValue: newProp });
+
+      const newFinanced = body.financedAmount !== undefined ? Number(body.financedAmount) : existing.financed_amount;
+      if (!isNaN(newFinanced) && newFinanced > 0 && newFinanced !== existing.financed_amount) {
+        updatedFields.push({ field: 'financedAmount', oldValue: existing.financed_amount, newValue: newFinanced });
+      }
+
+      const newInstallment = body.fixedInstallment !== undefined ? Number(body.fixedInstallment) : existing.fixed_installment;
+      if (!isNaN(newInstallment) && newInstallment > 0 && newInstallment !== existing.fixed_installment) {
+        updatedFields.push({ field: 'fixedInstallment', oldValue: existing.fixed_installment, newValue: newInstallment });
+      }
+
+      const newInterest = body.annualInterestRate !== undefined ? Number(body.annualInterestRate) : existing.annual_interest_rate;
+      if (!isNaN(newInterest) && newInterest >= 0 && newInterest !== existing.annual_interest_rate) {
+        updatedFields.push({ field: 'annualInterestRate', oldValue: existing.annual_interest_rate, newValue: newInterest });
+      }
+
+      const newTerm = body.termMonths !== undefined ? Number(body.termMonths) : existing.term_months;
+      if (!isNaN(newTerm) && newTerm > 0 && newTerm !== existing.term_months) {
+        updatedFields.push({ field: 'termMonths', oldValue: existing.term_months, newValue: newTerm });
+      }
+
+      const newStart = body.startDate !== undefined ? String(body.startDate).trim() : existing.start_date;
+      if (newStart && newStart !== existing.start_date) {
+        updatedFields.push({ field: 'startDate', oldValue: existing.start_date, newValue: newStart });
+      }
+
+      const newFine = body.finePercent !== undefined ? Number(body.finePercent) : existing.fine_percent;
+      if (!isNaN(newFine) && newFine >= 0 && newFine !== existing.fine_percent) {
+        updatedFields.push({ field: 'finePercent', oldValue: existing.fine_percent, newValue: newFine });
+      }
+
+      const newTr = body.trMode !== undefined ? (body.trMode === 'MONTHLY' ? 'MONTHLY' : 'ANNUAL') : existing.tr_mode;
+      if (newTr !== existing.tr_mode) {
+        updatedFields.push({ field: 'trMode', oldValue: existing.tr_mode, newValue: newTr });
+      }
+
+      if (updatedFields.length === 0) {
+        return jsonResponse(
+          { ok: false, code: 'NO_CHANGES_DETECTED', message: 'Nenhuma alteração foi detectada nos campos enviados.' },
+          400,
+          request,
+          env
+        );
+      }
+
+      const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+
+      // Execução RIGOROSAMENTE ATÔMICA (UPDATE contracts + INSERT audit_logs em lote único via env.DB.batch)
+      const batchStmts: any[] = [];
+
+      batchStmts.push(
+        env.DB.prepare(`
+          UPDATE contracts SET
+            name = ?,
+            property_description = ?,
+            financed_amount = ?,
+            fixed_installment = ?,
+            annual_interest_rate = ?,
+            term_months = ?,
+            start_date = ?,
+            fine_percent = ?,
+            tr_mode = ?,
+            updated_at = datetime('now')
+          WHERE id = ?
+        `).bind(
+          newName,
+          newProp,
+          newFinanced,
+          newInstallment,
+          newInterest,
+          newTerm,
+          newStart,
+          newFine,
+          newTr,
+          contractId
+        )
+      );
+
+      // Registra audit log detalhado para CADA campo alterado (sem incluir campos inalterados)
+      for (const item of updatedFields) {
+        const auditDetails = JSON.stringify({
+          contract_id: contractId,
+          admin_user_id: user.id,
+          admin_login: user.login,
+          timestamp: new Date().toISOString(),
+          field: item.field,
+          old_value: item.oldValue,
+          new_value: item.newValue,
+          reason,
+        });
+
+        batchStmts.push(
+          env.DB.prepare(`
+            INSERT INTO audit_logs (id, contract_id, user_id, action, entity_type, entity_id, details, ip_address, created_at)
+            VALUES (?, ?, ?, 'ADMIN_CONTRACT_OVERRIDE', 'CONTRACT', ?, ?, ?, datetime('now'))
+          `).bind(crypto.randomUUID(), contractId, user.id, contractId, auditDetails, clientIp)
+        );
+      }
+
+      try {
+        await env.DB.batch(batchStmts);
+      } catch (batchErr: any) {
+        return jsonResponse(
+          {
+            ok: false,
+            code: 'DATABASE_BATCH_ERROR',
+            message: `Falha na transação atômica do contrato e logs de auditoria: ${batchErr?.message || 'Erro de banco'}`,
+          },
+          500,
+          request,
+          env
+        );
+      }
+
+      const updated = await env.DB.prepare('SELECT * FROM contracts WHERE id = ?').bind(contractId).first<any>();
+      return jsonResponse(
+        {
+          ok: true,
+          message: 'Parâmetros contratuais atualizados excepcionalmente pelo Administrador.',
+          changedFieldsCount: updatedFields.length,
+          contract: formatContractDbRow(updated),
+        },
+        200,
+        request,
+        env
+      );
+    }
+
     // PUT ou PATCH /api/v1/contracts/:id -> Edição de parâmetros estruturais
     if (!subAction && (request.method === 'PUT' || request.method === 'PATCH')) {
       if (user.role !== 'ADMIN' && user.role !== 'SELLER') {

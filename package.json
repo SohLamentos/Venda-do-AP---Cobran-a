@@ -9,7 +9,7 @@
     "preview": "vite preview --port=3000 --host=0.0.0.0",
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:auth && npm run test:bootstrap && npm run test:login-roles && npm run test:user-management && npm run test:provisioned-admin && npm run test:emergency-reset && npm run test:etapa4b",
+    "test": "npm run test:auth && npm run test:bootstrap && npm run test:login-roles && npm run test:user-management && npm run test:provisioned-admin && npm run test:emergency-reset && npm run test:etapa4b && npm run test:etapa4e1c && npm run test:etapa4e2 && npm run test:etapa4e2a",
     "test:auth": "tsx scripts/test-cloudflare-auth.ts",
     "test:bootstrap": "tsx scripts/test-admin-bootstrap.ts",
     "test:login-roles": "tsx scripts/test-login-roles.ts",
@@ -17,6 +17,9 @@
     "test:provisioned-admin": "tsx scripts/test-provisioned-admin.ts",
     "test:emergency-reset": "tsx scripts/test-emergency-reset.ts",
     "test:etapa4b": "tsx scripts/test-etapa4b-d1-persistence.ts",
+    "test:etapa4e1c": "tsx scripts/test-etapa4e1c-contract-due-date.ts",
+    "test:etapa4e2": "tsx scripts/test-etapa4e2-admin-override-and-simulator.ts",
+    "test:etapa4e2a": "tsx scripts/test-etapa4e2a-official-regression.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },

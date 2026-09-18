@@ -22,6 +22,7 @@ import {
   AlertCircle,
   Save,
   ShieldCheck,
+  ShieldAlert,
   AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -47,6 +48,7 @@ import { AdminBootstrap } from './components/AdminBootstrap';
 import { AdminPanel } from './components/AdminPanel';
 import { SellerPanel } from './components/SellerPanel';
 import { BuyerJourney } from './components/BuyerJourney';
+import { AdminContractOverrideModal } from './components/AdminContractOverrideModal';
 
 
 const fileToBase64 = (file: File): Promise<string> => {
@@ -128,6 +130,7 @@ export default function App() {
 
   // Etapa 4A: Estados do Ciclo de Vida do Contrato (Rascunho & Ativação)
   const [isActivationModalOpen, setIsActivationModalOpen] = React.useState(false);
+  const [isAdminOverrideModalOpen, setIsAdminOverrideModalOpen] = React.useState(false);
   const [activationConfirmedCheck, setActivationConfirmedCheck] = React.useState(false);
   const [isSavingDraft, setIsSavingDraft] = React.useState(false);
   const [isActivating, setIsActivating] = React.useState(false);
@@ -926,6 +929,16 @@ export default function App() {
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-center text-xs text-slate-500">
               <span className="font-semibold text-slate-700">Operação em Andamento:</span>
               <p className="text-[11px] mt-0.5">Parâmetros bloqueados. Utilize <strong className="text-indigo-600">+ Novo Lançamento</strong> para pagamentos e amortizações.</p>
+              {user.role === 'ADMIN' && (
+                <button
+                  type="button"
+                  onClick={() => setIsAdminOverrideModalOpen(true)}
+                  className="w-full py-2 px-3 mt-2.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <ShieldAlert size={14} className="text-amber-700" />
+                  <span>Editar contrato — ADMIN</span>
+                </button>
+              )}
             </div>
           ) : null}
 
@@ -1449,6 +1462,24 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Modal de Edição Excepcional de Contrato Ativo - ADMIN (Etapa 4E.2) */}
+      <AdminContractOverrideModal
+        isOpen={isAdminOverrideModalOpen}
+        onClose={() => setIsAdminOverrideModalOpen(false)}
+        config={config}
+        onSuccess={(updated) => {
+          setConfig(updated);
+          setActionFeedback({
+            type: 'success',
+            message: 'Parâmetros contratuais atualizados excepcionalmente pelo Administrador. Audit log registrado.',
+          });
+          if (activeContractId) {
+            loadActiveContractData(activeContractId);
+          }
+          loadContracts();
+        }}
+      />
       
       <AnimatePresence>
         {viewingAttachment && (

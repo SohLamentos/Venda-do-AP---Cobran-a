@@ -259,6 +259,23 @@ class ApiService {
     return res.json();
   }
 
+  /**
+   * Admin: Edição Excepcional de Contrato Ativo (POST /api/v1/contracts/:id/admin-override)
+   * Registra audit log detalhado no D1 por campo alterado
+   */
+  async adminOverrideContract(
+    id: string,
+    payload: Partial<ContractConfig> & { reason?: string }
+  ): Promise<ApiResponse<ContractConfig>> {
+    const res = await fetch(`${this.baseUrl}/contracts/${encodeURIComponent(id)}/admin-override`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return res.json();
+  }
+
   async activateContract(id: string): Promise<ApiResponse<ContractConfig>> {
     const res = await fetch(`${this.baseUrl}/contracts/${encodeURIComponent(id)}/activate`, {
       method: 'POST',

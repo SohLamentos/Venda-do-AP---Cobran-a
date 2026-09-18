@@ -30,7 +30,7 @@ import {
 } from 'recharts';
 import { format, parse, addMonths } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { cn, formatCurrency, safeNumber, safeDate, round2, formatCurrencyInput, parseCurrencyBR } from '../lib/utils';
+import { cn, formatCurrency, safeNumber, safeDate, round2, formatCurrencyInput, parseCurrencyBR, parseBRL, formatBRL } from '../lib/utils';
 import { ContractConfig, Transaction, AmortizationRow, CloudflareUser } from '../types';
 import { financeService } from '../services/financeService';
 
@@ -317,14 +317,30 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
   }, [contractualConfig, contractualStartDate, stats.paidCount, amortization, projectedSchedule]);
 
   // 4. SIMULADOR DE ANTECIPAÇÃO (Estritamente Read-Only em Memória)
-  const [anticipationInput, setAnticipationInput] = React.useState('5000');
+  const [anticipationInput, setAnticipationInput] = React.useState('5.000,00');
   const [simulatedAmount, setSimulatedAmount] = React.useState<number>(5000);
+  const [simError, setSimError] = React.useState<string | null>(null);
 
   const handleSimulate = (e: React.FormEvent) => {
     e.preventDefault();
-    const val = parseCurrencyBR(anticipationInput);
+    const val = parseBRL(anticipationInput);
+    if (val <= 0) {
+      setSimError('O valor da antecipação deve ser maior que zero (ex: R$ 5.000,00).');
+      return;
+    }
+    if (val > stats.currentBalance) {
+      setSimError(`O valor não pode ser superior ao saldo devedor atual (${formatCurrency(stats.currentBalance)}).`);
+      return;
+    }
+    setSimError(null);
+    setSimulatedAmount(val);
+    setAnticipationInput(formatCurrencyInput(val));
+  };
+
+  const handleBlurInput = () => {
+    const val = parseBRL(anticipationInput);
     if (val > 0) {
-      setSimulatedAmount(val);
+      setAnticipationInput(formatCurrencyInput(val));
     }
   };
 
@@ -1089,7 +1105,11 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
                     <input
                       type="text"
                       value={anticipationInput}
-                      onChange={(e) => setAnticipationInput(e.target.value)}
+                      onChange={(e) => {
+                        setAnticipationInput(e.target.value);
+                        if (simError) setSimError(null);
+                      }}
+                      onBlur={handleBlurInput}
                       placeholder="5.000,00"
                       className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 text-slate-900 font-mono font-bold text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
@@ -1101,7 +1121,18 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
                     Simular
                   </button>
                 </div>
+                {simError && (
+                  <p className="text-xs text-rose-600 font-medium mt-1.5 flex items-center gap-1">
+                    {simError}
+                  </p>
+                )}
               </div>
+
+              {simulationResults.newEstimatedBalance === 0 && (
+                <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-bold">
+                  ✓ Cenário de quitação integral estimada: o valor simulado zera completamente o saldo devedor.
+                </div>
+              )}
 
               {/* Resultados da Simulação */}
               <div className="grid grid-cols-2 gap-3 pt-2">
@@ -1137,11 +1168,14 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
           </div>
 
           <div className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl text-[11px] text-amber-900 leading-relaxed space-y-1.5">
+            <p className="font-semibold text-amber-950">
+              Simulação considerando redução do prazo e manutenção da prestação.
+            </p>
             <p>
-              Para esta simulação, a TR futura foi considerada igual a 0%. O resultado é estimativo e poderá mudar conforme a TR efetivamente aplicada ao contrato.
+              Para esta simulação, a TR futura foi considerada igual a 0,00% a.a. O resultado é estimativo e poderá mudar conforme a TR efetivamente aplicada ao contrato.
             </p>
             <p className="text-[10px] text-amber-800">
-              Esta é uma simulação para planejamento. Os valores são estimados e podem variar conforme correções futuras e condições contratuais. Nenhum lançamento será realizado.
+              Esta é uma simulação para planejamento. Os valores são estimados e podem variar conforme correções futuras e condições contratuais. Nenhum lançamento financeiro será realizado.
             </p>
           </div>
         </div>

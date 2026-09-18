@@ -36,7 +36,7 @@ import {
   AreaChart, 
   Area 
 } from 'recharts';
-import { format, parse } from 'date-fns';
+import { format, parse, addMonths } from 'date-fns';
 import { cn, formatCurrency, formatPercent, safeNumber, safeDate, round2, parseCurrencyBR, formatCurrencyInput } from './lib/utils';
 import { financeService } from './services/financeService';
 import { apiService } from './services/apiService';
@@ -110,7 +110,7 @@ export default function App() {
     fixedInstallment: 0,
     annualInterestRate: 0,
     termMonths: 0,
-    startDate: format(new Date(), 'yyyy-MM-dd'),
+    startDate: '2026-09-10',
     finePercent: 0,
     trMode: 'ANNUAL',
   });
@@ -228,6 +228,9 @@ export default function App() {
       const contractRes = await apiService.getContract(contractId);
       if (contractRes.ok && contractRes.contract) {
         const c = contractRes.contract;
+        const sDate = c.startDate || '2026-09-10';
+        const parsedStartDate = safeDate(parse(sDate, 'yyyy-MM-dd', new Date()));
+        const contractDueDay = c.dueDay && c.dueDay >= 1 && c.dueDay <= 31 ? c.dueDay : parsedStartDate.getDate();
         setConfig({
           id: c.id,
           name: c.name || 'Contrato Principal',
@@ -236,7 +239,8 @@ export default function App() {
           fixedInstallment: safeNumber(c.fixedInstallment),
           annualInterestRate: safeNumber(c.annualInterestRate),
           termMonths: safeNumber(c.termMonths),
-          startDate: c.startDate || format(new Date(), 'yyyy-MM-dd'),
+          startDate: sDate,
+          dueDay: contractDueDay,
           finePercent: safeNumber(c.finePercent),
           trMode: c.trMode || 'ANNUAL',
           status: c.status || 'DRAFT',
@@ -1210,9 +1214,10 @@ export default function App() {
                    </div>
                    <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
-                          <thead className="bg-slate-50 border-b border-slate-200">
+                           <thead className="bg-slate-50 border-b border-slate-200">
                             <tr>
-                              <th className="px-6 py-4 font-bold text-slate-600">Data</th>
+                              <th className="px-6 py-4 font-bold text-slate-600">Data Pagamento</th>
+                              <th className="px-6 py-4 font-bold text-slate-600">Vencimento</th>
                               <th className="px-6 py-4 font-bold text-slate-600">Parcela</th>
                               <th className="px-6 py-4 font-bold text-slate-600">Tipo</th>
                               <th className="px-6 py-4 font-bold text-slate-600">Valor</th>
@@ -1226,7 +1231,7 @@ export default function App() {
                       <tbody className="divide-y divide-slate-100">
                         {(!Array.isArray(transactions) || transactions.length === 0) ? (
                           <tr>
-                            <td colSpan={user.role === 'BUYER' ? 6 : 7} className="px-6 py-12 text-center text-slate-400 italic">Nenhum lançamento registrado ainda.</td>
+                            <td colSpan={user.role === 'BUYER' ? 7 : 8} className="px-6 py-12 text-center text-slate-400 italic">Nenhum lançamento registrado ainda.</td>
                           </tr>
                         ) : (
                           [...transactions].sort((a, b) => {
@@ -1236,7 +1241,18 @@ export default function App() {
                           }).map(tx => (
                             <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
                               <td className="px-6 py-4 font-medium">{format(safeDate(parse(tx.date, 'yyyy-MM-dd', new Date())), 'dd/MM/yyyy')}</td>
-                              <td className="px-6 py-4 text-slate-500">#{tx.installmentNumber}</td>
+                              <td className="px-6 py-4 text-slate-600 font-medium">
+                                {tx.installmentNumber > 0
+                                  ? (() => {
+                                      const baseDate = safeDate(parse(config.startDate || '2026-09-10', 'yyyy-MM-dd', new Date()));
+                                      if (config.dueDay && config.dueDay >= 1 && config.dueDay <= 31) {
+                                        baseDate.setDate(config.dueDay);
+                                      }
+                                      return format(addMonths(baseDate, tx.installmentNumber - 1), 'dd/MM/yyyy');
+                                    })()
+                                  : '-'}
+                              </td>
+                              <td className="px-6 py-4 text-slate-500 font-mono">#{tx.installmentNumber}</td>
                               <td className="px-6 py-4">
                                 <span className={cn(
                                   "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full border",

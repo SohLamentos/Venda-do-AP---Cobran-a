@@ -9,6 +9,7 @@ export interface ContractConfig {
   annualInterestRate: number;
   termMonths: number;
   startDate: string;
+  dueDay?: number;
   finePercent: number;
   trMode: 'MONTHLY' | 'ANNUAL';
   ownerId?: string;

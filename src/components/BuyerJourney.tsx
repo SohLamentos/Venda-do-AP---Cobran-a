@@ -97,14 +97,56 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
 
   const lastRealizedRow = realizedRows.length > 0 ? realizedRows[realizedRows.length - 1] : null;
 
+  // Identificar a transação de pagamento correspondente à última parcela realizada para preservar paymentDate real
+  const lastRealizedPaymentTx = React.useMemo(() => {
+    if (!lastRealizedRow || !Array.isArray(transactions)) return null;
+    const matches = transactions.filter(
+      (tx) => tx.installmentNumber === lastRealizedRow.installmentNumber && tx.type === 'PAYMENT'
+    );
+    if (matches.length === 0) return null;
+    return matches.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+  }, [lastRealizedRow, transactions]);
+
+  // REGRA CANÔNICA CONTRATUAL:
+  // O dia de vencimento (dueDay) pertence ao contrato ativo (extraído de config.dueDay ou config.startDate).
+  // Separar estritamente:
+  // - dueDate: data de vencimento da competência (derivada de contractualStartDate e dueDay do contrato)
+  // - paymentDate: data efetiva em que o pagamento foi realizado (ex: 16/09/2026 para Parcela #1)
+  // NUNCA utilizar paymentDate para derivar o calendário de vencimentos futuros.
+  const contractDueDay = React.useMemo(() => {
+    if (config.dueDay && config.dueDay >= 1 && config.dueDay <= 31) {
+      return config.dueDay;
+    }
+    if (config.startDate) {
+      const parsed = safeDate(parse(config.startDate, 'yyyy-MM-dd', new Date()));
+      return parsed.getDate();
+    }
+    return 10;
+  }, [config.dueDay, config.startDate]);
+
+  const contractualStartDate = React.useMemo(() => {
+    const rawStart = config.startDate || '2026-09-10';
+    const parsed = safeDate(parse(rawStart, 'yyyy-MM-dd', new Date()));
+    parsed.setDate(contractDueDay);
+    return parsed;
+  }, [config.startDate, contractDueDay]);
+
+  const contractualConfig = React.useMemo(() => {
+    return {
+      ...config,
+      startDate: format(contractualStartDate, 'yyyy-MM-dd'),
+      dueDay: contractDueDay,
+    };
+  }, [config, contractualStartDate, contractDueDay]);
+
   // 2. UNIVERSO PROJETADO (Simulação de quitação contratual contínua com pagamentos regulares)
   const projectedSchedule = React.useMemo(() => {
     return financeService.calculateAmortization(
-      config,
+      contractualConfig,
       Array.isArray(transactions) ? transactions : [],
       'PROJECTED'
     );
-  }, [config, transactions]);
+  }, [contractualConfig, transactions]);
 
   // Indicadores Derivados Estritamente Segregados
   const stats = React.useMemo(() => {
@@ -168,17 +210,21 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
     // Próximo Vencimento
     const nextInstallmentNumber = paidCount + 1;
     const nextRow = projectedSchedule[paidCount] || null;
+    const contractStartDate = safeDate(parse(contractualConfig.startDate, 'yyyy-MM-dd', new Date()));
     const nextDueDate = nextRow
       ? safeDate(nextRow.date)
-      : addMonths(safeDate(parse(config.startDate, 'yyyy-MM-dd', new Date())), paidCount);
-    const nextAmount = nextRow ? safeNumber(nextRow.contractedInstallment) : safeNumber(config.fixedInstallment);
+      : addMonths(contractStartDate, paidCount);
+    const nextAmount = nextRow ? safeNumber(nextRow.contractedInstallment) : safeNumber(contractualConfig.fixedInstallment);
 
     // Previsão de Quitação pela Projeção Contratual
     let payoffRow = projectedSchedule.find((r) => r.finalBalance <= 0.01 && r.installmentNumber > 0);
     if (!payoffRow && projectedSchedule.length > 0) {
       payoffRow = projectedSchedule[projectedSchedule.length - 1];
     }
-    const payoffDate = payoffRow ? safeDate(payoffRow.date) : addMonths(safeDate(new Date()), remainingMonths);
+    const payoffInstallmentNumber = payoffRow ? payoffRow.installmentNumber : totalCount;
+    // REGRA CANÔNICA: Derivada estritamente do calendário contratual de vencimentos (Dia 10)
+    const payoffDate = payoffRow ? safeDate(payoffRow.date) : addMonths(contractStartDate, totalCount - 1);
+    const projectedRemainingPayments = Math.max(0, payoffInstallmentNumber - paidCount);
 
     return {
       currentBalance,
@@ -192,6 +238,7 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
       paidCount,
       totalCount,
       remainingMonths,
+      projectedRemainingPayments,
       debtPaidPercent,
       paidInstallmentsPercent,
       capitalPaidRatio,
@@ -202,37 +249,23 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
       nextDueDate,
       nextAmount,
       payoffDate,
+      payoffInstallmentNumber,
     };
-  }, [config, realizedRows, lastRealizedRow, projectedSchedule]);
+  }, [contractualConfig, realizedRows, lastRealizedRow, projectedSchedule]);
 
-  // 3. ESTRUTURAÇÃO DO NOVO GRÁFICO PRINCIPAL
+  // 3. ESTRUTURAÇÃO DO NOVO GRÁFICO PRINCIPAL (Sem duplicação temporal no ponto inicial)
   const chartData = React.useMemo<ChartPoint[]>(() => {
     const points: ChartPoint[] = [];
-    const financedAmount = safeNumber(config.financedAmount);
-    const startDate = safeDate(parse(config.startDate, 'yyyy-MM-dd', new Date()));
-    const totalCount = safeNumber(config.termMonths) || 240;
+    const totalCount = safeNumber(contractualConfig.termMonths) || 240;
     const paidCount = stats.paidCount;
 
-    // Ponto 0: Início do Contrato (Saldo Inicial)
-    points.push({
-      name: 0,
-      label: 'Início',
-      installmentNumber: 0,
-      date: startDate,
-      dateFormatted: format(startDate, 'dd/MM/yyyy'),
-      saldoRealizado: financedAmount,
-      saldoProjetado: financedAmount,
-      isRealized: true,
-      isToday: paidCount === 0,
-      status: 'Início do Contrato',
-    });
-
-    // Pontos 1..N
+    // Pontos 1..N: Representa claramente a posição a partir da Parcela #1 (Hoje) e a projeção futura
     for (let i = 0; i < totalCount; i++) {
       const instNum = i + 1;
       const realRow = amortization[i];
       const projRow = projectedSchedule[i];
-      const dueDate = realRow ? safeDate(realRow.date) : addMonths(startDate, i);
+      // Vencimento contratual derivado da âncora contratual
+      const dueDate = projRow ? safeDate(projRow.date) : addMonths(contractualStartDate, i);
 
       const isRealized =
         realRow &&
@@ -271,7 +304,7 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
           saldoProjetado: projRow ? safeNumber(projRow.finalBalance) : 0,
           isRealized: false,
           isToday: false,
-          valorPrevisto: projRow ? safeNumber(projRow.contractedInstallment) : safeNumber(config.fixedInstallment),
+          valorPrevisto: projRow ? safeNumber(projRow.contractedInstallment) : safeNumber(contractualConfig.fixedInstallment),
           capitalEstimado: projRow ? safeNumber(projRow.amortizationAmount) : 0,
           jurosEstimados: projRow ? safeNumber(projRow.interestAmount) : 0,
           trEstimada: projRow ? safeNumber(projRow.trCorrection) : 0,
@@ -281,7 +314,7 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
     }
 
     return points;
-  }, [config, stats.paidCount, amortization, projectedSchedule]);
+  }, [contractualConfig, contractualStartDate, stats.paidCount, amortization, projectedSchedule]);
 
   // 4. SIMULADOR DE ANTECIPAÇÃO (Estritamente Read-Only em Memória)
   const [anticipationInput, setAnticipationInput] = React.useState('5000');
@@ -342,7 +375,8 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
 
     const reducedMonths = Math.max(0, monthsBase - monthsSim);
     const estimatedInterestSaved = Math.max(0, round2(totalInterestBase - totalInterestSim));
-    const newPayoffDate = addMonths(safeDate(new Date()), monthsSim);
+    // Âncora temporal exata: deduz as parcelas economizadas da data contratual de quitação
+    const newPayoffDate = addMonths(stats.payoffDate, -reducedMonths);
 
     return {
       newEstimatedBalance,
@@ -363,6 +397,15 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
     }
   }, [stats.payoffDate]);
 
+  const payoffFormattedShort = React.useMemo(() => {
+    try {
+      const formatted = format(stats.payoffDate, "MMM/yyyy", { locale: ptBR });
+      return formatted.charAt(0).toUpperCase() + formatted.slice(1);
+    } catch {
+      return 'Em definição';
+    }
+  }, [stats.payoffDate]);
+
   const simPayoffFormatted = React.useMemo(() => {
     try {
       const formatted = format(simulationResults.newPayoffDate, "MMMM 'de' yyyy", { locale: ptBR });
@@ -371,6 +414,23 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
       return 'Em definição';
     }
   }, [simulationResults.newPayoffDate]);
+
+  // Marcos Simplificados para o Eixo Horizontal (X) do Gráfico
+  const payoffInstallment = stats.payoffInstallmentNumber || stats.totalCount;
+  const xAxisTicks = React.useMemo(() => {
+    const todayTick = stats.paidCount > 0 ? stats.paidCount : 1;
+    return [todayTick, 60, 120, 180, payoffInstallment];
+  }, [stats.paidCount, payoffInstallment]);
+
+  const formatXAxisTick = (val: number): string => {
+    const todayTick = stats.paidCount > 0 ? stats.paidCount : 1;
+    if (val === todayTick) return 'Hoje';
+    if (val === 60) return '5 anos';
+    if (val === 120) return '10 anos';
+    if (val === 180) return '15 anos';
+    if (val === payoffInstallment) return 'Quitação';
+    return '';
+  };
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto pb-12">
@@ -463,13 +523,21 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
           </div>
         </div>
 
-        {/* CARD 4 — PARCELAS PAGAS */}
+        {/* CARD 4 — PROGRESSO DO CONTRATO */}
         <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col justify-between">
           <div className="flex items-start justify-between">
             <div>
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Parcelas Pagas</span>
-              <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight mt-2 font-mono">
-                {stats.paidCount} de {stats.totalCount}
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Progresso do Contrato</span>
+                <div className="group relative inline-flex items-center">
+                  <HelpCircle size={14} className="text-slate-400 hover:text-slate-600 cursor-help" />
+                  <div className="invisible group-hover:visible absolute left-0 bottom-full mb-2 w-64 p-2.5 bg-slate-900 text-white text-[11px] font-medium rounded-lg shadow-xl z-30 leading-relaxed pointer-events-none">
+                    O número de parcelas pagas e o percentual do capital quitado são diferentes porque parte de cada pagamento corresponde a juros e correções.
+                  </div>
+                </div>
+              </div>
+              <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight mt-2 font-mono">
+                {stats.paidCount} de {stats.totalCount} parcelas pagas
               </h2>
             </div>
             <div className="w-11 h-11 rounded-xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 shrink-0">
@@ -485,7 +553,7 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
             </div>
             <div className="flex justify-between items-center text-[11px] font-semibold text-slate-500">
               <span>{formatPercentFriendly(stats.paidInstallmentsPercent)} das parcelas</span>
-              <span>{stats.remainingMonths} restantes</span>
+              <span>{stats.remainingMonths} restantes no prazo original</span>
             </div>
           </div>
         </div>
@@ -526,20 +594,20 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
             <div className="flex items-baseline gap-3">
               <span className="text-xl font-black text-emerald-700">{payoffFormatted}</span>
             </div>
-            <p className="text-xs text-slate-500">Mantendo os pagamentos previstos</p>
+            <p className="text-xs text-slate-500">Quitação na parcela #{stats.payoffInstallmentNumber} mantendo os pagamentos regulares</p>
           </div>
           <div className="hidden sm:flex px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-700 text-xs font-bold">
-            {stats.remainingMonths} Meses Restantes
+            {stats.projectedRemainingPayments} Parcelas Restantes
           </div>
         </div>
       </div>
 
-      {/* 4. NOVO GRÁFICO PRINCIPAL — EVOLUÇÃO DO SALDO DEVEDOR */}
+      {/* 4. GRÁFICO PRINCIPAL — SUA DÍVIDA AO LONGO DO TEMPO */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
           <div>
-            <h2 className="text-lg font-bold text-slate-900 tracking-tight">Evolução do Saldo Devedor</h2>
-            <p className="text-xs text-slate-500 font-medium">Veja o que já aconteceu e a projeção mantendo os pagamentos</p>
+            <h2 className="text-lg font-bold text-slate-900 tracking-tight">Sua dívida ao longo do tempo</h2>
+            <p className="text-xs text-slate-500 font-medium">Veja como seu saldo pode diminuir mantendo os pagamentos previstos.</p>
           </div>
 
           <div className="flex items-center gap-5 text-xs font-semibold">
@@ -554,6 +622,35 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
           </div>
         </div>
 
+        {/* Destaque dos Pontos Chave: HOJE e QUITAÇÃO PREVISTA */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <div className="flex items-center justify-between p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200/80">
+            <div className="flex items-center gap-2.5">
+              <div className="w-3 h-3 rounded-full bg-emerald-600 shrink-0" />
+              <div>
+                <span className="text-[11px] font-bold text-emerald-800 uppercase tracking-wider block">Hoje</span>
+                <span className="text-lg font-black text-slate-900 font-mono">{formatCurrency(stats.currentBalance)}</span>
+              </div>
+            </div>
+            <span className="text-[11px] font-bold text-emerald-700 bg-white px-2.5 py-1 rounded-lg border border-emerald-200 shadow-2xs">
+              Parcela #{stats.paidCount} paga
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200/80">
+            <div className="flex items-center gap-2.5">
+              <div className="w-3 h-3 rounded-full bg-indigo-600 shrink-0" />
+              <div>
+                <span className="text-[11px] font-bold text-indigo-800 uppercase tracking-wider block">Quitação prevista</span>
+                <span className="text-lg font-black text-slate-900">{payoffFormattedShort}</span>
+              </div>
+            </div>
+            <span className="text-[11px] font-bold text-indigo-700 bg-white px-2.5 py-1 rounded-lg border border-indigo-200 shadow-2xs">
+              Saldo R$ 0,00
+            </span>
+          </div>
+        </div>
+
         <div className="h-[340px] w-full">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 15, right: 20, left: 10, bottom: 5 }}>
@@ -562,9 +659,9 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
                 dataKey="name"
                 axisLine={false}
                 tickLine={false}
-                tick={{ fontSize: 11, fill: '#64748b' }}
-                minTickGap={25}
-                label={{ value: 'Parcelas', position: 'insideBottom', offset: -5, fontSize: 11, fill: '#94a3b8' }}
+                ticks={xAxisTicks}
+                tickFormatter={formatXAxisTick}
+                tick={{ fontSize: 11, fill: '#475569', fontWeight: 600 }}
               />
               <YAxis
                 axisLine={false}
@@ -582,7 +679,7 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
                   stroke="#059669"
                   strokeDasharray="3 3"
                   label={{
-                    value: 'HOJE',
+                    value: `Hoje (${formatCurrency(stats.currentBalance)})`,
                     fill: '#059669',
                     fontSize: 11,
                     fontWeight: 800,
@@ -774,25 +871,43 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
         </div>
       </div>
 
-      {/* 6. SUA JORNADA ATÉ A QUITAÇÃO (MARCOS) */}
+      {/* 6. SUA JORNADA ATÉ A QUITAÇÃO — PROGRESSO DA QUITAÇÃO */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h3 className="text-base font-bold text-slate-900">Sua Jornada até a Quitação</h3>
-            <p className="text-xs text-slate-500 font-medium">Acompanhe seu progresso de amortização do capital financiado</p>
-          </div>
-          <div className="text-right">
-            <span className="text-xs font-bold text-emerald-600 font-mono">
-              {formatPercentFriendly(stats.debtPaidPercent)} amortizado
-            </span>
-            <p className="text-[11px] text-slate-400">
-              {formatCurrency(stats.amortizedPrincipal)} de {formatCurrency(stats.financedAmount)}
+            <div className="flex items-center gap-2">
+              <h3 className="text-base font-bold text-slate-900">Progresso da Quitação</h3>
+              <div className="group relative inline-flex items-center">
+                <HelpCircle size={14} className="text-slate-400 hover:text-slate-600 cursor-help" />
+                <div className="invisible group-hover:visible absolute left-0 bottom-full mb-2 w-72 p-2.5 bg-slate-900 text-white text-[11px] font-medium rounded-lg shadow-xl z-30 leading-relaxed pointer-events-none">
+                  O número de parcelas pagas e o percentual do capital quitado são diferentes porque parte de cada pagamento corresponde a juros e correções.
+                </div>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 font-medium mt-0.5">
+              Acompanhe seu progresso de amortização do capital financiado
             </p>
+          </div>
+          <div className="text-left sm:text-right">
+            <span className="text-sm sm:text-base font-bold text-slate-700 block">
+              {formatCurrency(stats.amortizedPrincipal)} de {formatCurrency(stats.financedAmount)} amortizados
+            </span>
+            <span className="text-xs font-bold text-emerald-600 font-mono">
+              {formatPercentFriendly(stats.debtPaidPercent)} do capital
+            </span>
           </div>
         </div>
 
+        {/* Nota explicativa amigável */}
+        <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl flex items-start gap-2.5 text-xs text-slate-600 leading-relaxed">
+          <Info size={16} className="text-indigo-600 shrink-0 mt-0.5" />
+          <p>
+            O número de parcelas pagas e o percentual do capital quitado são diferentes porque parte de cada pagamento corresponde a juros e correções.
+          </p>
+        </div>
+
         {/* Barra de Marcos */}
-        <div className="relative pt-6 pb-2">
+        <div className="relative pt-2 pb-2">
           <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden">
             <div
               className="bg-emerald-500 h-full rounded-full transition-all duration-500"
@@ -864,9 +979,31 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
                   <div>
                     <span className="text-xs text-slate-500 font-semibold">Competência</span>
                     <h4 className="text-lg font-black text-slate-900">Parcela #{lastRealizedRow.installmentNumber}</h4>
-                    <span className="text-xs text-slate-500">
-                      {format(safeDate(lastRealizedRow.date), 'dd/MM/yyyy')}
-                    </span>
+                    <div className="flex flex-col text-xs text-slate-600 mt-1 space-y-0.5">
+                      <span>
+                        Vencimento:{' '}
+                        <strong className="text-slate-800 font-semibold">
+                          {format(
+                            addMonths(
+                              contractualStartDate,
+                              lastRealizedRow.installmentNumber - 1
+                            ),
+                            'dd/MM/yyyy'
+                          )}
+                        </strong>
+                      </span>
+                      {lastRealizedPaymentTx && (
+                        <span className="text-emerald-700 font-medium">
+                          Pago em:{' '}
+                          <strong className="font-semibold">
+                            {format(
+                              safeDate(parse(lastRealizedPaymentTx.date, 'yyyy-MM-dd', new Date())),
+                              'dd/MM/yyyy'
+                            )}
+                          </strong>
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="text-right">
                     <span className="text-xs text-slate-500 font-semibold">Valor Pago</span>
@@ -930,7 +1067,9 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
                   <Calculator size={18} className="text-indigo-600" />
                   <h3 className="text-base font-bold text-slate-900">Simule uma Antecipação</h3>
                 </div>
-                <p className="text-xs text-slate-500">Veja o impacto de amortizar um valor extra</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Simulação considerando redução do prazo e manutenção da prestação.
+                </p>
               </div>
               <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded">
                 Simulador
@@ -974,7 +1113,7 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
                 </div>
 
                 <div className="p-3 bg-emerald-50/60 border border-emerald-100 rounded-xl">
-                  <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider">Economia em Juros</span>
+                  <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider">Economia Estimada em Juros</span>
                   <p className="text-base font-black text-emerald-700 font-mono mt-0.5">
                     {formatCurrency(simulationResults.estimatedInterestSaved)}
                   </p>
@@ -997,8 +1136,13 @@ export const BuyerJourney: React.FC<BuyerJourneyProps> = ({
             </form>
           </div>
 
-          <div className="p-3 bg-amber-50/60 border border-amber-200 rounded-xl text-[11px] text-amber-800 leading-snug">
-            <strong>Aviso de segurança:</strong> Esta é apenas uma simulação em memória para planejamento financeiro. Nenhum lançamento será realizado.
+          <div className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl text-[11px] text-amber-900 leading-relaxed space-y-1.5">
+            <p>
+              Para esta simulação, a TR futura foi considerada igual a 0%. O resultado é estimativo e poderá mudar conforme a TR efetivamente aplicada ao contrato.
+            </p>
+            <p className="text-[10px] text-amber-800">
+              Esta é uma simulação para planejamento. Os valores são estimados e podem variar conforme correções futuras e condições contratuais. Nenhum lançamento será realizado.
+            </p>
           </div>
         </div>
       </div>
@@ -1013,7 +1157,7 @@ function CustomChartTooltip({ active, payload }: any) {
   if (!active || !payload || !payload.length) return null;
 
   const data: ChartPoint = payload[0].payload;
-  const isRealized = data.isRealized && data.name > 0;
+  const isRealized = Boolean(data.isRealized);
 
   return (
     <div className="bg-white p-4 rounded-xl shadow-xl border border-slate-200 text-xs space-y-2 min-w-[240px]">
